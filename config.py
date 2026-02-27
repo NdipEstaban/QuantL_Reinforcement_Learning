@@ -5,7 +5,7 @@ All project settings. Edit this file before running anything.
 """
 
 # ── DATA ─────────────────────────────────────────────────────────
-DATA_FILE = "data/raw/EURUSD_M15_2010-2016.csv"
+DATA_FILE = "data/raw/EURUSD_2024_M15_fixed.csv"
 DATE_COLUMN     = "date"          # name of datetime column in your CSV
 OPEN_COLUMN     = "open"
 HIGH_COLUMN     = "high"
@@ -62,16 +62,18 @@ SL_ATR_BUFFER = 0.1
 # ── REWARD ───────────────────────────────────────────────────────
 REWARD_FUNCTION = "account_flip_aggressive"
 
-FLIP_RRR_MULTIPLIER = 3.0
+FLIP_RRR_MULTIPLIER = 4.0
 FLIP_LOG_SCALE = 10.0
-FLIP_INACTION_PENALTY = -0.0002
+FLIP_INACTION_PENALTY = -0.00005
 FLIP_FLAT_WINDOW = 20  # candles before tier escalates
 FLIP_FLAT_ESCALATION = 3.0
-FLIP_DD_FREE_ZONE = 0.05
-FLIP_DD_PENALTY_WEIGHT = 5.0
 FLIP_FREQ_BONUS_WEIGHT = 0.0005  # new — rewards trade frequency
 FLIP_WIN_BONUS_THRESHOLD = 0.02
 FLIP_WIN_BONUS_SCALE = 5.0
+
+# config.py
+FLIP_DD_PENALTY_WEIGHT = 2.0  # was 5.0 — too harsh on volatile regimes
+FLIP_DD_FREE_ZONE = 0.08  # was 0.05 — wider free zone for volatile data
 
 # ── PARALLELISATION ───────────────────────────────────────────────
 N_ENVS = 6  # parallel environments
@@ -79,23 +81,23 @@ N_ENVS = 6  # parallel environments
 # decrease to 4 if you get memory errors
 
 # ── TRAINING ─────────────────────────────────────────────────────
-TOTAL_TIMESTEPS = 5_000_000
+TOTAL_TIMESTEPS = 500_000
 ALGORITHM = "PPO"
 CHECKPOINT_FREQ = 100_000
 MODEL_SAVE_PATH = "models/forex_ppo"
 LOG_DIR = "logs/"
 
 PPO_CONFIG = {
-    "learning_rate": 0.0001,
     "n_steps": 2048,  # steps per env per iteration
     # total per iter = 2048 × 8 = 16,384
     "batch_size": 384,  # was 256 — scale with n_envs
     # rule of thumb: batch_size = n_envs × 64
     "n_epochs": 5,
-    "gamma": 0.99,
+    "gamma": 0.98,
     "gae_lambda": 0.95,
-    "clip_range": 0.15,
-    "ent_coef": 0.05,
+    "ent_coef": 0.08,  # higher than normal — force re-exploration on new regime
+    "learning_rate": 0.00005,  # half the normal rate — preserve Phase 2 knowledge
+    "clip_range": 0.1,  # tighter — prevent large policy jumps that destroy Phase 2
 }
 
 # ── EVALUATION ───────────────────────────────────────────────────
