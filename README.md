@@ -135,6 +135,11 @@ python run.py dashboard
 ```
 Opens interactive dashboard at http://127.0.0.1:8050
 
+### Step 5: Forward test
+```bash
+python run.py forwardtest --data data\unseen\EURUSD_2024_M15_fixed.csv
+```
+
 ### Run everything at once
 ```bash
 python run.py all

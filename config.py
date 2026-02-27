@@ -5,7 +5,7 @@ All project settings. Edit this file before running anything.
 """
 
 # ── DATA ─────────────────────────────────────────────────────────
-DATA_FILE = "data/raw/EURUSD_2022_M15.csv"
+DATA_FILE = "data/raw/EURUSD_M15_2010-2016.csv"
 DATE_COLUMN     = "date"          # name of datetime column in your CSV
 OPEN_COLUMN     = "open"
 HIGH_COLUMN     = "high"
@@ -15,7 +15,7 @@ VOLUME_COLUMN   = "volume"        # set to None if no volume
 
 # Broker timezone → will be converted to UTC for session features
 # "Etc/GMT-2" = UTC+2 | "Etc/GMT-3" = UTC+3 | "UTC" = already UTC
-BROKER_TIMEZONE = "Etc/GMT-3" #TODO: CHANGE TO UTC as current data is in utc
+BROKER_TIMEZONE = "UTC" 
 
 # ── FEATURE ENGINEERING ──────────────────────────────────────────
 
@@ -45,10 +45,10 @@ ASIAN_END       = 8
 
 # ── ENVIRONMENT ──────────────────────────────────────────────────
 POSITIONS               = [-1, 0, 1]   # short / flat / long
-TRADING_FEES            = 0.0001       # ~1 pip spread
+TRADING_FEES            = 0.0003       # ~3 pip spread
 BORROW_INTEREST_RATE    = 0.000003     # per step, for shorts
 PORTFOLIO_INITIAL_VALUE = 10_000
-MAX_EPISODE_DURATION    = 2000         # candles per episode
+MAX_EPISODE_DURATION = 2000  # candles per episode
 INITIAL_POSITION        = "random"
 
 # ── RISK ─────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ N_ENVS = 6  # parallel environments
 # decrease to 4 if you get memory errors
 
 # ── TRAINING ─────────────────────────────────────────────────────
-TOTAL_TIMESTEPS = 3_000_000
+TOTAL_TIMESTEPS = 5_000_000
 ALGORITHM = "PPO"
 CHECKPOINT_FREQ = 100_000
 MODEL_SAVE_PATH = "models/forex_ppo"
@@ -89,15 +89,16 @@ PPO_CONFIG = {
     "learning_rate": 0.0001,
     "n_steps": 2048,  # steps per env per iteration
     # total per iter = 2048 × 8 = 16,384
-    "batch_size": 512,  # was 256 — scale with n_envs
+    "batch_size": 384,  # was 256 — scale with n_envs
     # rule of thumb: batch_size = n_envs × 64
     "n_epochs": 5,
-    "gamma": 0.999,
+    "gamma": 0.99,
     "gae_lambda": 0.95,
     "clip_range": 0.15,
     "ent_coef": 0.05,
 }
 
 # ── EVALUATION ───────────────────────────────────────────────────
+BASE_TF = "M15"
 TRAIN_TEST_SPLIT = 0.80   # first 80% train, last 20% test
 WFO_FOLDS        = 5      # walk-forward folds

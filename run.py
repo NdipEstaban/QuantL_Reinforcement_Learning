@@ -26,6 +26,8 @@ import sys
 import os
 import argparse
 
+from evaluation.backtest import run_full_dataset
+
 
 def cmd_features(args):
     from features.pipeline import load_and_process
@@ -151,7 +153,7 @@ def cmd_forwardtest(args):
     # Run episode on entire new dataset
     print("\nRunning forward test...")
     env = Monitor(make_env(df, mode="eval"))
-    episode = run_episode(model, env, deterministic=True)
+    episode = run_full_dataset(model, df, mode="eval")
     metrics = compute_metrics(episode["portfolio_values"], episode["trades"])
 
     print_metrics(metrics, title="FORWARD TEST — Unseen Data")
