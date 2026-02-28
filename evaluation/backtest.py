@@ -4,8 +4,21 @@ evaluation/backtest.py
 Walk-forward backtesting and model evaluation.
 
 Usage:
-    python run.py backtest
-    python run.py backtest --wfo
+    python run.py backtest                              # Run backtest
+    python run.py backtest --wfo                        # Walk-forward backtest
+    python run.py backtest --render                     # Backtest + save render logs
+    python run.py forwardtest --data X.csv --render     # Forward test + render logs
+
+Render workflow:
+    Step 1 — Run with --render flag:
+        python run.py backtest --render
+        Saves .pkl files to:  render_logs/train/   render_logs/test/
+
+    Step 2 — Launch the viewer:
+        python run.py render --render-dir render_logs/train
+        python run.py render --render-dir render_logs/test
+        python run.py render --render-dir render_logs/forwardtest
+        Opens http://127.0.0.1:5000  (press Ctrl+C to stop)
 """
 
 import os
@@ -22,12 +35,40 @@ from env.trading_env import make_env
 from evaluation.metrics import compute_metrics, print_metrics
 from training.reward import get_reward_function
 
-from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
 
-# ── helpers ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# MODEL LOADER  (RecurrentPPO-aware)
+# ══════════════════════════════════════════════════════════════════
+
+
+def _load_model(model_path: str):
+    """
+    Load model using the correct algorithm class.
+
+    Critical: PPO.load() on a RecurrentPPO checkpoint silently drops every
+    LSTM weight and falls back to a blank MLP policy with no error or warning.
+    Always use RecurrentPPO.load() when config.ALGORITHM == "RecurrentPPO".
+    """
+    algo = getattr(config, "ALGORITHM", "PPO")
+    if algo == "RecurrentPPO":
+        try:
+            from sb3_contrib import RecurrentPPO
+
+            return RecurrentPPO.load(model_path, device="cpu")
+        except ImportError:
+            print("  ⚠  sb3-contrib not installed — falling back to PPO.load().")
+            print("     LSTM weights will be lost. Fix: pip install sb3-contrib")
+    from stable_baselines3 import PPO
+
+    return PPO.load(model_path, device="cpu")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ENV HELPERS
+# ══════════════════════════════════════════════════════════════════
 
 
 def _make_single_env(df, mode="eval"):
@@ -44,7 +85,9 @@ def _make_eval_env(df, episode_len):
     """
     Create a deterministic eval env with an explicit episode length.
     gym-trading-env requires len(df) > episode_len to pick a start index.
-    This function sets max_episode_duration directly so we control it.
+
+    Returns Monitor(TradingEnv).
+    Access the raw TradingEnv via env.unwrapped — needed for save_for_render().
     """
     reward_fn = get_reward_function(config.REWARD_FUNCTION)
     env = gym.make(
@@ -63,16 +106,46 @@ def _make_eval_env(df, episode_len):
     return Monitor(env)
 
 
-# ── episode runner ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# EPISODE RUNNER
+# ══════════════════════════════════════════════════════════════════
 
 
-def run_episode(model, env, deterministic: bool = True) -> dict:
+def run_episode(
+    model,
+    env,
+    deterministic: bool = True,
+    save_render: bool = False,
+    render_dir: str = "render_logs",
+) -> dict:
     """
     Run one episode. env must be a plain (non-vec) Monitor-wrapped env.
 
     Supports both PPO (stateless) and RecurrentPPO (stateful LSTM).
     For RecurrentPPO, lstm_states are carried across timesteps and reset
-    at episode boundaries via episode_starts flag.
+    at episode boundaries via the episode_starts flag.
+
+    Parameters
+    ----------
+    save_render : When True, saves a render snapshot after the episode ends.
+                  gym-trading-env's save_for_render() writes a numbered .pkl
+                  to render_dir/ that the Renderer can load and display as an
+                  interactive candlestick + portfolio chart in the browser.
+
+                  Must be called on env.unwrapped (the raw TradingEnv), NOT
+                  on the Monitor wrapper. Gymnasium's .unwrapped property
+                  traverses the full wrapper chain transparently.
+
+                  Requirement: the DataFrame passed to TradingEnv must contain
+                  open, high, low, close columns. Our pipeline always keeps
+                  these intact, so save_for_render will never assert-fail. ✓
+
+                  Multiple episodes writing to the same render_dir are
+                  auto-numbered by the library — nothing overwrites.
+
+    render_dir  : Directory to write .pkl snapshot files into.
+                  Use different subdirs per run (train/test/forwardtest) so
+                  the Renderer can be pointed at each independently.
     """
     obs, info = env.reset()
     done = False
@@ -83,10 +156,10 @@ def run_episode(model, env, deterministic: bool = True) -> dict:
     entry_price = None
     entry_pos = 0
 
-    # LSTM state tracking — None for standard PPO (ignored), initialised
-    # automatically by RecurrentPPO on first predict() call
+    # LSTM state — None for plain PPO (silently ignored by SB3).
+    # RecurrentPPO auto-initialises on the first predict() call.
     lstm_states = None
-    episode_starts = np.ones((1,), dtype=bool)  # True = start of episode
+    episode_starts = np.ones((1,), dtype=bool)  # True = first step of episode
 
     while not done and not truncated:
         action, lstm_states = model.predict(
@@ -95,7 +168,7 @@ def run_episode(model, env, deterministic: bool = True) -> dict:
             episode_start=episode_starts,
             deterministic=deterministic,
         )
-        episode_starts = np.zeros((1,), dtype=bool)  # not start after first step
+        episode_starts = np.zeros((1,), dtype=bool)  # False for all subsequent steps
         obs, reward, done, truncated, info = env.step(action)
 
         pv = info.get("portfolio_valuation", config.PORTFOLIO_INITIAL_VALUE)
@@ -125,6 +198,30 @@ def run_episode(model, env, deterministic: bool = True) -> dict:
                 entry_price = price if pos != 0 else None
                 entry_pos = pos
 
+    # ── Render snapshot ───────────────────────────────────────────
+    if save_render:
+        try:
+            os.makedirs(render_dir, exist_ok=True)
+            
+            # Store original index if it exists
+            if hasattr(env.unwrapped, 'df') and env.unwrapped.df is not None:
+                original_index = env.unwrapped.df.index.copy()
+                # Convert to naive if it has timezone
+                if original_index.tz is not None:
+                    env.unwrapped.df.index = original_index.tz_localize(None)
+            
+            env.unwrapped.save_for_render(dir=render_dir)
+            
+            # Restore original index if we changed it
+            if hasattr(env.unwrapped, 'df') and env.unwrapped.df is not None:
+                if 'original_index' in locals():
+                    env.unwrapped.df.index = original_index
+                    
+        except AssertionError as e:
+            print(f"  ⚠  save_for_render skipped (OHLC columns missing?): {e}")
+        except Exception as e:
+            print(f"  ⚠  save_for_render error — {type(e).__name__}: {e}")
+
     return {
         "portfolio_values": portfolio_values,
         "positions": positions,
@@ -132,10 +229,18 @@ def run_episode(model, env, deterministic: bool = True) -> dict:
     }
 
 
-# ── full dataset runner ───────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# FULL DATASET RUNNER
+# ══════════════════════════════════════════════════════════════════
 
 
-def run_full_dataset(model, df, mode="eval") -> dict:
+def run_full_dataset(
+    model,
+    df,
+    mode: str = "eval",
+    save_render: bool = False,
+    render_dir: str = "render_logs",
+) -> dict:
     """
     Run the model across the ENTIRE dataset by running consecutive episodes.
 
@@ -149,6 +254,10 @@ def run_full_dataset(model, df, mode="eval") -> dict:
       - Portfolio curve is additive (P&L stacked), not multiplicative
       - Per-episode median/mean return printed for consistency check
       - All trades collected for aggregate win rate / profit factor
+
+    When save_render=True, each episode writes a numbered .pkl to render_dir/.
+    The Renderer loads all of them and lets you navigate between episodes
+    using arrows in the browser UI.
 
     crash fix: chunk_size = ep_len * 2 so gym-trading-env reset() has
     room to pick a start index (needs len(df) > max_episode_duration).
@@ -167,18 +276,26 @@ def run_full_dataset(model, df, mode="eval") -> dict:
         f"covering {min(len(starts) * step_size, len(df)):,} "
         f"of {len(df):,} candles..."
     )
+    if save_render:
+        print(f"  Render logs → {os.path.abspath(render_dir)}/")
 
     init = config.PORTFOLIO_INITIAL_VALUE
     all_trades = []
     all_positions = []
     episode_returns = []
     episode_max_dds = []
-    additive_pv = []  # P&L stacked additively — no exponential compounding
+    additive_pv = []
 
     for start in starts:
         chunk = df.iloc[start : start + chunk_size]
         env = _make_eval_env(chunk, episode_len=ep_len)
-        ep = run_episode(model, env, deterministic=True)
+        ep = run_episode(
+            model,
+            env,
+            deterministic=True,
+            save_render=save_render,
+            render_dir=render_dir,
+        )
         env.close()
 
         pv = np.array(ep["portfolio_values"])
@@ -190,12 +307,9 @@ def run_full_dataset(model, df, mode="eval") -> dict:
             dd = (pv - peak) / np.maximum(peak, 1e-8)
             episode_max_dds.append(float(dd.min()))
 
-            # Additive stacking: shift episode P&L to start from last value
-            # pv - pv[0] = P&L of this episode starting at 0
-            # + offset   = continue from previous endpoint
             offset = additive_pv[-1] if additive_pv else init
-            ep_pnl = pv - pv[0]  # P&L curve starting at 0
-            ep_shifted = ep_pnl + offset  # shift to current base
+            ep_pnl = pv - pv[0]
+            ep_shifted = ep_pnl + offset
             additive_pv.extend(ep_shifted.tolist())
 
         all_trades.extend(ep["trades"])
@@ -218,10 +332,16 @@ def run_full_dataset(model, df, mode="eval") -> dict:
     }
 
 
-# ── simple backtest ───────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# SIMPLE BACKTEST
+# ══════════════════════════════════════════════════════════════════
 
 
-def simple_backtest(model_path: str = None) -> dict:
+def simple_backtest(
+    model_path: str = None,
+    save_render: bool = False,
+    render_dir: str = "render_logs",
+) -> dict:
     df = load_processed()
     split_idx = int(len(df) * config.TRAIN_TEST_SPLIT)
     train_df = df.iloc[:split_idx]
@@ -240,12 +360,23 @@ def simple_backtest(model_path: str = None) -> dict:
         )
 
     print(f"Loading model: {model_path}")
-    model = PPO.load(model_path, device="cpu")
+    model = _load_model(model_path)
 
     results = {}
     for name, subset in [("TRAIN", train_df), ("TEST", test_df)]:
         print(f"\nRunning {name} ({len(subset):,} candles)...")
-        episode = run_full_dataset(model, subset, mode="eval")
+
+        # Each split gets its own subdir so train and test .pkl files
+        # stay separate — the Renderer can be pointed at either one.
+        split_render_dir = os.path.join(render_dir, name.lower())
+
+        episode = run_full_dataset(
+            model,
+            subset,
+            mode="eval",
+            save_render=save_render,
+            render_dir=split_render_dir,
+        )
         metrics = compute_metrics(episode["portfolio_values"], episode["trades"])
         print_metrics(metrics, title=f"{name} Results")
 
@@ -264,12 +395,20 @@ def simple_backtest(model_path: str = None) -> dict:
             "metrics": metrics,
             "episode": episode,
             "df": subset,
+            "render_dir": split_render_dir if save_render else None,
         }
+
+    if save_render:
+        print(f"\n✅ Render logs saved.")
+        print(f"   Train  →  python run.py render --render-dir {render_dir}/train")
+        print(f"   Test   →  python run.py render --render-dir {render_dir}/test")
 
     return results
 
 
-# ── walk-forward backtest ─────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# WALK-FORWARD BACKTEST
+# ══════════════════════════════════════════════════════════════════
 
 
 def walk_forward_backtest(model_path: str = None) -> list:
@@ -319,13 +458,16 @@ def walk_forward_backtest(model_path: str = None) -> list:
 
         if base_path:
             print(f"  Fine-tuning for 200,000 steps...")
-            model = PPO.load(base_path, env=train_env, device="cpu")
+            model = _load_model(base_path)
+            model.set_env(train_env)
             model.learn(
                 total_timesteps=200_000,
                 reset_num_timesteps=False,
                 progress_bar=False,
             )
         else:
+            from stable_baselines3 import PPO
+
             scratch_steps = min(200_000, len(train_df) * 5)
             print(f"  Training from scratch for {scratch_steps:,} steps...")
             ppo_kwargs = {k: v for k, v in config.PPO_CONFIG.items() if k != "verbose"}
@@ -334,7 +476,6 @@ def walk_forward_backtest(model_path: str = None) -> list:
 
         train_env.close()
 
-        # Evaluate across full fold using chained episodes
         episode = run_full_dataset(model, test_df, mode="eval")
         metrics = compute_metrics(episode["portfolio_values"], episode["trades"])
         print_metrics(metrics, title=f"Fold {fold + 1} Out-of-Sample")
@@ -368,15 +509,33 @@ def walk_forward_backtest(model_path: str = None) -> list:
     return all_metrics
 
 
+# ══════════════════════════════════════════════════════════════════
+# CLI (direct usage)
+# ══════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--wfo", action="store_true")
     parser.add_argument("--model", type=str, default=None)
+    parser.add_argument(
+        "--render", action="store_true", help="Save render logs after running"
+    )
+    parser.add_argument(
+        "--render-dir",
+        type=str,
+        default="render_logs",
+        dest="render_dir",
+        help="Directory to save render .pkl files (default: render_logs)",
+    )
     args = parser.parse_args()
 
     if args.wfo:
         walk_forward_backtest(args.model)
     else:
-        simple_backtest(args.model)
+        simple_backtest(
+            model_path=args.model,
+            save_render=args.render,
+            render_dir=args.render_dir,
+        )

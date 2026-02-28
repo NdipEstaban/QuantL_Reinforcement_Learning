@@ -144,7 +144,14 @@ python run.py forwardtest --data data\unseen\EURUSD_2024_M15_fixed.csv
 ```bash
 python run.py all
 ```
+### Render performance
+# Step 1 — run and save logs
+python run.py backtest --render
+python run.py forwardtest --data 2025.csv --render
 
+# Step 2 — open browser viewer
+python run.py render --render-dir render_logs/test
+python run.py render --render-dir render_logs/forwardtest
 ---
 
 ## FEATURE DEFINITIONS (exact ICT definitions used)

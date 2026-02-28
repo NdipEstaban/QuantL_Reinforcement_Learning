@@ -68,7 +68,7 @@ def load_raw_data(path: str = None) -> pd.DataFrame:
     df["low"] = df[["open", "low", "close"]].min(axis=1)
 
     # Convert timezone to UTC
-    if df.index.tzinfo is None:
+    if df.index.tz is None:
         try:
             import pytz
 
@@ -79,6 +79,7 @@ def load_raw_data(path: str = None) -> pd.DataFrame:
             df.index = df.index.tz_localize("UTC")
     else:
         df.index = df.index.tz_convert("UTC")
+        
 
     print(f"  Loaded {len(df):,} candles | {df.index[0]} → {df.index[-1]}")
     return df
