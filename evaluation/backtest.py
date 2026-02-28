@@ -69,6 +69,10 @@ def _make_eval_env(df, episode_len):
 def run_episode(model, env, deterministic: bool = True) -> dict:
     """
     Run one episode. env must be a plain (non-vec) Monitor-wrapped env.
+
+    Supports both PPO (stateless) and RecurrentPPO (stateful LSTM).
+    For RecurrentPPO, lstm_states are carried across timesteps and reset
+    at episode boundaries via episode_starts flag.
     """
     obs, info = env.reset()
     done = False
@@ -79,8 +83,19 @@ def run_episode(model, env, deterministic: bool = True) -> dict:
     entry_price = None
     entry_pos = 0
 
+    # LSTM state tracking — None for standard PPO (ignored), initialised
+    # automatically by RecurrentPPO on first predict() call
+    lstm_states = None
+    episode_starts = np.ones((1,), dtype=bool)  # True = start of episode
+
     while not done and not truncated:
-        action, _ = model.predict(obs, deterministic=deterministic)
+        action, lstm_states = model.predict(
+            obs,
+            state=lstm_states,
+            episode_start=episode_starts,
+            deterministic=deterministic,
+        )
+        episode_starts = np.zeros((1,), dtype=bool)  # not start after first step
         obs, reward, done, truncated, info = env.step(action)
 
         pv = info.get("portfolio_valuation", config.PORTFOLIO_INITIAL_VALUE)

@@ -20,13 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 from features.structure import add_structure_features
-from features.zones     import add_zone_features
-from features.session   import add_session_features
+from features.zones import add_zone_features
+from features.session import add_session_features
 
 
 # ══════════════════════════════════════════════════════
 # DATA LOADER
 # ══════════════════════════════════════════════════════
+
 
 def load_raw_data(path: str = None) -> pd.DataFrame:
     """
@@ -40,11 +41,11 @@ def load_raw_data(path: str = None) -> pd.DataFrame:
 
     # Rename columns to lowercase standard names
     rename = {
-        config.DATE_COLUMN  : "date",
-        config.OPEN_COLUMN  : "open",
-        config.HIGH_COLUMN  : "high",
-        config.LOW_COLUMN   : "low",
-        config.CLOSE_COLUMN : "close",
+        config.DATE_COLUMN: "date",
+        config.OPEN_COLUMN: "open",
+        config.HIGH_COLUMN: "high",
+        config.LOW_COLUMN: "low",
+        config.CLOSE_COLUMN: "close",
     }
     if config.VOLUME_COLUMN and config.VOLUME_COLUMN in df.columns:
         rename[config.VOLUME_COLUMN] = "volume"
@@ -63,15 +64,16 @@ def load_raw_data(path: str = None) -> pd.DataFrame:
     df = df.drop_duplicates()
 
     # Ensure OHLCV validity
-    df["high"]  = df[["open", "high", "close"]].max(axis=1)
-    df["low"]   = df[["open", "low",  "close"]].min(axis=1)
+    df["high"] = df[["open", "high", "close"]].max(axis=1)
+    df["low"] = df[["open", "low", "close"]].min(axis=1)
 
     # Convert timezone to UTC
     if df.index.tzinfo is None:
         try:
             import pytz
+
             broker_tz = pytz.timezone(config.BROKER_TIMEZONE)
-            df.index  = df.index.tz_localize(broker_tz).tz_convert("UTC")
+            df.index = df.index.tz_localize(broker_tz).tz_convert("UTC")
         except Exception as e:
             print(f"  [pipeline] Timezone conversion failed ({e}) — assuming UTC.")
             df.index = df.index.tz_localize("UTC")
@@ -85,6 +87,7 @@ def load_raw_data(path: str = None) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 # FEATURE PIPELINE
 # ══════════════════════════════════════════════════════
+
 
 def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -101,11 +104,13 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # ATR must be computed first — every module depends on it
     print("\n[0/4] Computing ATR...")
     from features.structure import compute_atr
+
     df["_atr"] = compute_atr(df)
 
     # Step 1: FVG (needed for ITH/ITL FVG-qualification path)
     print("\n[1/4] Fair Value Gaps...")
     from features.zones import add_fvg_features
+
     df = add_fvg_features(df)
 
     # Step 2: Full structure (uses _fvg_* columns from step 1)
@@ -115,6 +120,7 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     # Step 3: OB + BB (needs _ith_price, _itl_price, BOS flags)
     print("\n[3/4] Order Blocks + Breaker Blocks...")
     from features.zones import add_order_block_features, add_breaker_block_features
+
     df = add_order_block_features(df)
     df = add_breaker_block_features(df)
 
@@ -126,7 +132,7 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna()
 
-    feature_cols  = [c for c in df.columns if c.startswith("feature_")]
+    feature_cols = [c for c in df.columns if c.startswith("feature_")]
     internal_cols = [c for c in df.columns if c.startswith("_")]
 
     print(f"\n{'═'*55}")
@@ -145,6 +151,7 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 # LOAD + PROCESS + SAVE
 # ══════════════════════════════════════════════════════
+
 
 def load_and_process(data_path: str = None, save: bool = True) -> pd.DataFrame:
     """
@@ -167,11 +174,12 @@ def load_processed(path: str = "data/processed/features.pkl") -> pd.DataFrame:
     """Load a previously processed DataFrame."""
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"No processed data found at {path}.\n"
-            "Run: python -m features.pipeline"
+            f"No processed data found at {path}.\n" "Run: python -m features.pipeline"
         )
     df = pd.read_pickle(path)
-    print(f"Loaded processed data: {len(df):,} candles, {len([c for c in df.columns if c.startswith('feature_')])} features")
+    print(
+        f"Loaded processed data: {len(df):,} candles, {len([c for c in df.columns if c.startswith('feature_')])} features"
+    )
     return df
 
 

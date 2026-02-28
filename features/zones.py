@@ -41,6 +41,7 @@ A bearish breaker was originally a bullish OB that got broken below.
 import numpy as np
 import pandas as pd
 import sys, os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
@@ -48,6 +49,7 @@ import config
 # ══════════════════════════════════════════════════════
 # FAIR VALUE GAPS
 # ══════════════════════════════════════════════════════
+
 
 def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -59,25 +61,25 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
         feature_fvg_position        0.0→1.0 (where in FVG is price)
         feature_dist_to_fvg         ATR-normalised distance to FVG midpoint
     """
-    df    = df.copy()
-    n     = len(df)
-    high  = df["high"].values
-    low   = df["low"].values
+    df = df.copy()
+    n = len(df)
+    high = df["high"].values
+    low = df["low"].values
     close = df["close"].values
-    atr   = df["_atr"].values
+    atr = df["_atr"].values
 
     # Internal arrays
-    _fvg_top   = np.full(n, np.nan)
-    _fvg_bot   = np.full(n, np.nan)
-    _fvg_dir   = np.zeros(n)
-    _fvg_fill  = np.full(n, np.nan)
+    _fvg_top = np.full(n, np.nan)
+    _fvg_bot = np.full(n, np.nan)
+    _fvg_dir = np.zeros(n)
+    _fvg_fill = np.full(n, np.nan)
 
     # Feature arrays
-    fvg_active   = np.zeros(n)
+    fvg_active = np.zeros(n)
     fvg_dir_feat = np.zeros(n)
-    fvg_rebal    = np.full(n, 0.0)
-    fvg_pos      = np.full(n, np.nan)
-    dist_fvg     = np.full(n, np.nan)
+    fvg_rebal = np.full(n, 0.0)
+    fvg_pos = np.full(n, np.nan)
+    dist_fvg = np.full(n, np.nan)
 
     # Active FVG list: [top, bottom, direction, filled_pct]
     active = []
@@ -85,9 +87,9 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
     for i in range(2, n):
 
         # ── Detect new FVG ──────────────────────────────
-        if low[i] > high[i - 2]:           # bullish gap
+        if low[i] > high[i - 2]:  # bullish gap
             active.append([low[i], high[i - 2], 1, 0.0])
-        if high[i] < low[i - 2]:           # bearish gap
+        if high[i] < low[i - 2]:  # bearish gap
             active.append([low[i - 2], high[i], -1, 0.0])
 
         # ── Update fill on all active FVGs ──────────────
@@ -97,9 +99,9 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
             gap = t - b
             if gap <= 0:
                 continue
-            if d == 1:    # bullish: track how much price has come back down
+            if d == 1:  # bullish: track how much price has come back down
                 filled = np.clip((t - close[i]) / gap, 0.0, 1.0)
-            else:          # bearish: track how much price has come back up
+            else:  # bearish: track how much price has come back up
                 filled = np.clip((close[i] - b) / gap, 0.0, 1.0)
             fvg[3] = filled
             if filled < 1.0:
@@ -113,14 +115,14 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
         best = active[-1]
         t, b, d, filled = best
 
-        _fvg_top[i]  = t
-        _fvg_bot[i]  = b
-        _fvg_dir[i]  = d
+        _fvg_top[i] = t
+        _fvg_bot[i] = b
+        _fvg_dir[i] = d
         _fvg_fill[i] = filled
 
-        fvg_active[i]   = 1
+        fvg_active[i] = 1
         fvg_dir_feat[i] = d
-        fvg_rebal[i]    = filled
+        fvg_rebal[i] = filled
 
         gap = t - b
         if gap > 0:
@@ -130,16 +132,16 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
         if atr[i] > 0:
             dist_fvg[i] = (mid - close[i]) / atr[i]
 
-    df["_fvg_top"]             = _fvg_top
-    df["_fvg_bottom"]          = _fvg_bot
-    df["_fvg_direction"]       = _fvg_dir
-    df["_fvg_filled_pct"]      = _fvg_fill
+    df["_fvg_top"] = _fvg_top
+    df["_fvg_bottom"] = _fvg_bot
+    df["_fvg_direction"] = _fvg_dir
+    df["_fvg_filled_pct"] = _fvg_fill
 
-    df["feature_fvg_active"]        = fvg_active
-    df["feature_fvg_direction"]     = fvg_dir_feat
+    df["feature_fvg_active"] = fvg_active
+    df["feature_fvg_direction"] = fvg_dir_feat
     df["feature_fvg_rebalance_pct"] = fvg_rebal
-    df["feature_fvg_position"]      = fvg_pos
-    df["feature_dist_to_fvg"]       = dist_fvg
+    df["feature_fvg_position"] = fvg_pos
+    df["feature_dist_to_fvg"] = dist_fvg
 
     return df
 
@@ -148,15 +150,16 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
 # ORDER BLOCKS
 # ══════════════════════════════════════════════════════
 
+
 def _find_ob_at_swing_tip(
-    tip_idx   : int,
-    direction : int,        # +1 = swing HIGH tip → bearish OB (look for up-close candles)
-                            # -1 = swing LOW  tip → bullish OB (look for down-close candles)
-    open_arr  : np.ndarray,
-    close_arr : np.ndarray,
-    high_arr  : np.ndarray,
-    low_arr   : np.ndarray,
-    lookback  : int = 10,
+    tip_idx: int,
+    direction: int,  # +1 = swing HIGH tip → bearish OB (look for up-close candles)
+    # -1 = swing LOW  tip → bullish OB (look for down-close candles)
+    open_arr: np.ndarray,
+    close_arr: np.ndarray,
+    high_arr: np.ndarray,
+    low_arr: np.ndarray,
+    lookback: int = 10,
 ) -> tuple:
     """
     At the confirmed swing tip (tip_idx), walk backwards and collect the
@@ -208,14 +211,14 @@ def _find_ob_at_swing_tip(
         → ob_high = open[j], ob_low = close[j]
     """
     search_start = max(0, tip_idx - lookback)
-    collected    = []   # indices of consecutive opposing candles
+    collected = []  # indices of consecutive opposing candles
 
     # Walk backwards from the tip collecting consecutive opposing candles
     for j in range(tip_idx, search_start - 1, -1):
 
-        if direction == 1:      # swing HIGH → look for UP-close candles
+        if direction == 1:  # swing HIGH → look for UP-close candles
             is_opposing = close_arr[j] > open_arr[j]
-        else:                   # swing LOW  → look for DOWN-close candles
+        else:  # swing LOW  → look for DOWN-close candles
             is_opposing = close_arr[j] < open_arr[j]
 
         if is_opposing:
@@ -229,18 +232,18 @@ def _find_ob_at_swing_tip(
         return np.nan, np.nan, -1
 
     # ── Compute OB zone boundaries from the collected candles ──
-    if direction == 1:      # bearish OB — bodies of UP-close candles
-        ob_high = max(close_arr[j] for j in collected)   # top of bodies
-        ob_low  = min(open_arr[j]  for j in collected)   # bottom of bodies
-    else:                   # bullish OB — bodies of DOWN-close candles
-        ob_high = max(open_arr[j]  for j in collected)   # top of bodies
-        ob_low  = min(close_arr[j] for j in collected)   # bottom of bodies
+    if direction == 1:  # bearish OB — bodies of UP-close candles
+        ob_high = max(close_arr[j] for j in collected)  # top of bodies
+        ob_low = min(open_arr[j] for j in collected)  # bottom of bodies
+    else:  # bullish OB — bodies of DOWN-close candles
+        ob_high = max(open_arr[j] for j in collected)  # top of bodies
+        ob_low = min(close_arr[j] for j in collected)  # bottom of bodies
 
     # Safety check
     if ob_high <= ob_low:
         return np.nan, np.nan, -1
 
-    start_idx = collected[-1]   # oldest candle in the run
+    start_idx = collected[-1]  # oldest candle in the run
     return ob_high, ob_low, start_idx
 
 
@@ -280,28 +283,32 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
         if r not in df.columns:
             raise ValueError(f"Missing {r} — run structure detection first.")
 
-    df    = df.copy()
-    n     = len(df)
+    df = df.copy()
+    n = len(df)
     open_ = df["open"].values
     close = df["close"].values
-    high  = df["high"].values
-    low   = df["low"].values
-    atr   = df["_atr"].values
+    high = df["high"].values
+    low = df["low"].values
+    atr = df["_atr"].values
 
     # Structure flags — OBs are anchored to these confirmations
     ith_flag = df["_ith_flag"].values.astype(bool)
     itl_flag = df["_itl_flag"].values.astype(bool)
-    lth_flag = df.get("_lth_flag", pd.Series(np.zeros(n, dtype=bool), index=df.index)).values.astype(bool)
-    ltl_flag = df.get("_ltl_flag", pd.Series(np.zeros(n, dtype=bool), index=df.index)).values.astype(bool)
+    lth_flag = df.get(
+        "_lth_flag", pd.Series(np.zeros(n, dtype=bool), index=df.index)
+    ).values.astype(bool)
+    ltl_flag = df.get(
+        "_ltl_flag", pd.Series(np.zeros(n, dtype=bool), index=df.index)
+    ).values.astype(bool)
 
     _ob_high_arr = np.full(n, np.nan)
-    _ob_low_arr  = np.full(n, np.nan)
+    _ob_low_arr = np.full(n, np.nan)
 
-    ob_active    = np.zeros(n)
-    ob_dir_feat  = np.zeros(n)
-    ob_pos       = np.full(n, np.nan)
-    ob_50_dist   = np.full(n, np.nan)
-    ob_correct   = np.zeros(n)
+    ob_active = np.zeros(n)
+    ob_dir_feat = np.zeros(n)
+    ob_pos = np.full(n, np.nan)
+    ob_50_dist = np.full(n, np.nan)
+    ob_correct = np.zeros(n)
 
     # Active OBs: list of [ob_high, ob_low, direction (+1/-1)]
     active_obs = []
@@ -314,28 +321,28 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
         # When ITH confirmed → Bearish OB at that swing tip
         if ith_flag[i] or lth_flag[i]:
             oh, ol, ob_idx = _find_ob_at_swing_tip(
-                tip_idx   = i,
-                direction = 1,          # swing HIGH → bearish OB
-                open_arr  = open_,
-                close_arr = close,
-                high_arr  = high,
-                low_arr   = low,
+                tip_idx=i,
+                direction=1,  # swing HIGH → bearish OB
+                open_arr=open_,
+                close_arr=close,
+                high_arr=high,
+                low_arr=low,
             )
             if not np.isnan(oh) and oh > ol:
-                active_obs.append([oh, ol, -1])   # -1 = bearish OB
+                active_obs.append([oh, ol, -1])  # -1 = bearish OB
 
         # When ITL confirmed → Bullish OB at that swing tip
         if itl_flag[i] or ltl_flag[i]:
             oh, ol, ob_idx = _find_ob_at_swing_tip(
-                tip_idx   = i,
-                direction = -1,         # swing LOW → bullish OB
-                open_arr  = open_,
-                close_arr = close,
-                high_arr  = high,
-                low_arr   = low,
+                tip_idx=i,
+                direction=-1,  # swing LOW → bullish OB
+                open_arr=open_,
+                close_arr=close,
+                high_arr=high,
+                low_arr=low,
             )
             if not np.isnan(oh) and oh > ol:
-                active_obs.append([oh, ol, 1])    # +1 = bullish OB
+                active_obs.append([oh, ol, 1])  # +1 = bullish OB
 
         # ── Step 2: Mitigate OBs that price closed through ──────────
         # Bullish OB: mitigated when close BELOW the OB low (institution failed)
@@ -343,8 +350,10 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
         still_active = []
         for ob in active_obs:
             oh, ol, od = ob
-            if od == 1  and close[i] < ol:  continue   # bullish OB mitigated
-            if od == -1 and close[i] > oh:  continue   # bearish OB mitigated
+            if od == 1 and close[i] < ol:
+                continue  # bullish OB mitigated
+            if od == -1 and close[i] > oh:
+                continue  # bearish OB mitigated
             still_active.append(ob)
         active_obs = still_active
 
@@ -355,14 +364,14 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
         oh, ol, od = active_obs[-1]
 
         _ob_high_arr[i] = oh
-        _ob_low_arr[i]  = ol
-        ob_active[i]    = 1
-        ob_dir_feat[i]  = od
+        _ob_low_arr[i] = ol
+        ob_active[i] = 1
+        ob_dir_feat[i] = od
 
         rng = oh - ol
         if rng > 0:
             pos = np.clip((close[i] - ol) / rng, 0.0, 1.0)
-            ob_pos[i]     = pos
+            ob_pos[i] = pos
             ob_50_dist[i] = abs(pos - 0.5)
 
         # Correct side:
@@ -373,12 +382,12 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
         else:
             ob_correct[i] = 1 if close[i] >= ol else 0
 
-    df["_ob_high"]                = _ob_high_arr
-    df["_ob_low"]                 = _ob_low_arr
-    df["feature_ob_active"]       = ob_active
-    df["feature_ob_direction"]    = ob_dir_feat
-    df["feature_ob_position"]     = ob_pos
-    df["feature_ob_50_dist"]      = ob_50_dist
+    df["_ob_high"] = _ob_high_arr
+    df["_ob_low"] = _ob_low_arr
+    df["feature_ob_active"] = ob_active
+    df["feature_ob_direction"] = ob_dir_feat
+    df["feature_ob_position"] = ob_pos
+    df["feature_ob_50_dist"] = ob_50_dist
     df["feature_ob_correct_side"] = ob_correct
 
     return df
@@ -387,6 +396,7 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 # BREAKER BLOCKS
 # ══════════════════════════════════════════════════════
+
 
 def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -412,30 +422,36 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
         feature_bb_correct_side 1=price returning from correct side
     """
     if "_ob_high" not in df.columns:
-        raise ValueError("Run add_order_block_features before add_breaker_block_features.")
+        raise ValueError(
+            "Run add_order_block_features before add_breaker_block_features."
+        )
 
-    df    = df.copy()
-    n     = len(df)
+    df = df.copy()
+    n = len(df)
     close = df["close"].values
-    bos_bull = df.get("feature_bos_bull_it", pd.Series(np.zeros(n), index=df.index)).values
-    bos_bear = df.get("feature_bos_bear_it", pd.Series(np.zeros(n), index=df.index)).values
+    bos_bull = df.get(
+        "feature_bos_bull_it", pd.Series(np.zeros(n), index=df.index)
+    ).values
+    bos_bear = df.get(
+        "feature_bos_bear_it", pd.Series(np.zeros(n), index=df.index)
+    ).values
 
     _bb_high_arr = np.full(n, np.nan)
-    _bb_low_arr  = np.full(n, np.nan)
-    bb_active    = np.zeros(n)
-    bb_dir_feat  = np.zeros(n)
-    bb_pos       = np.full(n, np.nan)
-    bb_50_dist   = np.full(n, np.nan)
-    bb_correct   = np.zeros(n)
+    _bb_low_arr = np.full(n, np.nan)
+    bb_active = np.zeros(n)
+    bb_dir_feat = np.zeros(n)
+    bb_pos = np.full(n, np.nan)
+    bb_50_dist = np.full(n, np.nan)
+    bb_correct = np.zeros(n)
 
     # Track former OBs that have been broken → become breakers
     # Format: [high, low, direction_as_breaker]
     active_breakers = []
-    former_obs      = []   # OBs we'll monitor for being broken
+    former_obs = []  # OBs we'll monitor for being broken
 
     ob_high_vals = df["_ob_high"].values
-    ob_low_vals  = df["_ob_low"].values
-    ob_dir_vals  = df["feature_ob_direction"].values
+    ob_low_vals = df["_ob_low"].values
+    ob_dir_vals = df["feature_ob_direction"].values
 
     # Track which OB zones have been seen — use a dict keyed by
     # (rounded high, rounded low, direction) to avoid float equality issues
@@ -476,8 +492,9 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
 
         # ── Remove breakers price has moved far past ──
         active_breakers = [
-            b for b in active_breakers
-            if not (b[2] == 1  and c < b[1] - 2 * df["_atr"].values[i])
+            b
+            for b in active_breakers
+            if not (b[2] == 1 and c < b[1] - 2 * df["_atr"].values[i])
             and not (b[2] == -1 and c > b[0] + 2 * df["_atr"].values[i])
         ]
 
@@ -486,28 +503,28 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
 
         bh, bl, bd = active_breakers[-1]
         _bb_high_arr[i] = bh
-        _bb_low_arr[i]  = bl
-        bb_active[i]    = 1
-        bb_dir_feat[i]  = bd
+        _bb_low_arr[i] = bl
+        bb_active[i] = 1
+        bb_dir_feat[i] = bd
 
         rng = bh - bl
         if rng > 0:
             pos = np.clip((c - bl) / rng, 0.0, 1.0)
-            bb_pos[i]     = pos
+            bb_pos[i] = pos
             bb_50_dist[i] = abs(pos - 0.5)
 
-        if bd == 1:   # bullish breaker — price should be at or below it
+        if bd == 1:  # bullish breaker — price should be at or below it
             bb_correct[i] = 1 if c <= bh else 0
         else:
             bb_correct[i] = 1 if c >= bl else 0
 
-    df["_bb_high"]               = _bb_high_arr
-    df["_bb_low"]                = _bb_low_arr
-    df["feature_bb_active"]      = bb_active
-    df["feature_bb_direction"]   = bb_dir_feat
-    df["feature_bb_position"]    = bb_pos
-    df["feature_bb_50_dist"]     = bb_50_dist
-    df["feature_bb_correct_side"]= bb_correct
+    df["_bb_high"] = _bb_high_arr
+    df["_bb_low"] = _bb_low_arr
+    df["feature_bb_active"] = bb_active
+    df["feature_bb_direction"] = bb_dir_feat
+    df["feature_bb_position"] = bb_pos
+    df["feature_bb_50_dist"] = bb_50_dist
+    df["feature_bb_correct_side"] = bb_correct
 
     return df
 
@@ -515,6 +532,7 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 # MASTER
 # ══════════════════════════════════════════════════════
+
 
 def add_zone_features(df: pd.DataFrame) -> pd.DataFrame:
     print("  [zones] Detecting Fair Value Gaps...")
