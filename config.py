@@ -11,7 +11,7 @@ OPEN_COLUMN = "open"
 HIGH_COLUMN = "high"
 LOW_COLUMN = "low"
 CLOSE_COLUMN = "close"
-VOLUME_COLUMN = "volume"  # set to None if no volume
+VOLUME_COLUMN = "None"  # set to None if no volume
 
 # Broker timezone → will be converted to UTC for session features
 BROKER_TIMEZONE = "UTC"
@@ -35,10 +35,10 @@ ASIAN_END = 8
 
 # ── ENVIRONMENT ──────────────────────────────────────────────────
 POSITIONS = [-1, 0, 1]
-TRADING_FEES = 0.0003  # 3 pips — DO NOT CHANGE
+TRADING_FEES = 0.0001  # 3 pips — DO NOT CHANGE
 BORROW_INTEREST_RATE = 0.000003
 PORTFOLIO_INITIAL_VALUE = 10_000
-MAX_EPISODE_DURATION = 2000
+MAX_EPISODE_DURATION = 4000
 INITIAL_POSITION = "random"
 
 # ── RISK ─────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ REWARD_FUNCTION = "account_flip_aggressive"  # DO NOT CHANGE
 
 FLIP_RRR_MULTIPLIER = 4.0  # DO NOT CHANGE
 FLIP_LOG_SCALE = 10.0
-FLIP_INACTION_PENALTY = -0.00005
+FLIP_INACTION_PENALTY = -0.000025  # was -0.00005, halved for 4000-step episodes
 FLIP_FLAT_WINDOW = 20
 FLIP_FLAT_ESCALATION = 3.0
 FLIP_FREQ_BONUS_WEIGHT = 0.0005
@@ -84,8 +84,8 @@ PPO_CONFIG = {
     "gamma": 0.98,
     "gae_lambda": 0.95,
     "ent_coef": 0.08,
-    "learning_rate": 0.00003,  # same as Phase 2 — preserve LSTM memory
-    "clip_range": 0.08,  # keep tight
+    "learning_rate": 0.00003,
+    "clip_range": 0.08,
 }
 
 # ── EVALUATION ───────────────────────────────────────────────────
