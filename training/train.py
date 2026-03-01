@@ -34,6 +34,9 @@ from features.pipeline import load_processed, load_and_process
 from env.trading_env import make_env
 from training.callbacks import get_callbacks
 
+import json
+from datetime import datetime, timezone
+
 
 def split_data(df: pd.DataFrame) -> tuple:
     split_idx = int(len(df) * config.TRAIN_TEST_SPLIT)
@@ -243,5 +246,200 @@ def train(data_path: str = None):
     return model, train_df, test_df
 
 
-if __name__ == "__main__":
-    train()
+def train_phase(phase: dict) -> None:
+    """
+    Train one phase from config.TRAINING_PHASES.
+    Each phase fully specifies algorithm, data, timesteps, and save path.
+    """
+    name = phase["name"]
+    algo_name = phase.get("algorithm", config.ALGORITHM)
+    data_file = phase["data_file"]
+    timesteps = phase["timesteps"]
+    resume_path = phase.get("resume_from")
+    save_dir = phase.get("save_to", config.MODEL_SAVE_PATH)
+    skip = phase.get("skip", False)
+
+    if skip:
+        print(f"\n{'─'*55}")
+        print(f"  SKIPPING: {name}")
+        print(f"{'─'*55}")
+        return
+
+    print(f"\n{'═'*55}")
+    print(f"  PHASE: {name}")
+    print(f"  {phase.get('description', '')}")
+    print(f"  Algorithm  : {algo_name}")
+    print(f"  Data       : {data_file}")
+    print(f"  Timesteps  : {timesteps:,}")
+    print(f"  Resume     : {resume_path or 'fresh'}")
+    print(f"  Save to    : {save_dir}")
+    print(f"{'═'*55}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(config.LOG_DIR, exist_ok=True)
+
+    from features.pipeline import load_and_process
+
+    df = load_and_process(data_file, save=False)
+    _, test_df = split_data(df)
+
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+    from env.trading_env import make_env
+
+    train_env = VecMonitor(
+        SubprocVecEnv(
+            [lambda: make_env(df, mode="train") for _ in range(config.N_ENVS)]
+        )
+    )
+    eval_env = VecMonitor(SubprocVecEnv([lambda: make_env(test_df, mode="eval")]))
+
+    AlgorithmClass = get_algorithm(algo_name)
+    is_recurrent = algo_name == "RecurrentPPO"
+
+    # Per-phase ppo_config overrides the global config.PPO_CONFIG.
+    # Only keys present in the phase dict are overridden — missing keys
+    # fall through to config.PPO_CONFIG so you never have to repeat defaults.
+    phase_ppo = phase.get("ppo_config", {})
+    merged_ppo = {**config.PPO_CONFIG, **phase_ppo}  # phase wins on overlap
+    ppo_kwargs = {k: v for k, v in merged_ppo.items() if k != "verbose"}
+
+    print(f"  PPO config (merged):")
+    for k, v in sorted(ppo_kwargs.items()):
+        changed = " ← phase override" if k in phase_ppo else ""
+        print(f"    {k:<18} = {v}{changed}")
+
+    if is_recurrent:
+        policy_class = "MlpLstmPolicy"
+        policy_kwargs = dict(
+            lstm_hidden_size=config.LSTM_HIDDEN_SIZE,
+            n_lstm_layers=config.LSTM_N_LAYERS,
+            shared_lstm=False,
+            enable_critic_lstm=True,
+        )
+    else:
+        policy_class, policy_kwargs = "MlpPolicy", {}
+
+    if resume_path and os.path.exists(resume_path):
+        print(f"  Loading: {resume_path}")
+        model = AlgorithmClass.load(
+            resume_path,
+            env=train_env,
+            device="cpu",
+            policy_kwargs=policy_kwargs if is_recurrent else None,
+        )
+        # Apply the merged (phase-overridden) hyperparams onto the loaded model
+        _apply_config_hyperparams(model, merged_ppo)
+    else:
+        model = AlgorithmClass(
+            policy_class,
+            train_env,
+            device="cpu",
+            tensorboard_log=config.LOG_DIR,
+            verbose=1,
+            policy_kwargs=policy_kwargs,
+            **ppo_kwargs,
+        )
+
+    callbacks = get_callbacks(eval_env=eval_env)
+    try:
+        model.learn(
+            total_timesteps=timesteps,
+            callback=callbacks,
+            reset_num_timesteps=(resume_path is None),
+            progress_bar=False,
+        )
+    except KeyboardInterrupt:
+        print(f"\n  Interrupted — saving partial checkpoint for {name}")
+
+    final_path = os.path.join(save_dir, "final_model")
+    model.save(final_path)
+    print(f"  ✅ Model: {final_path}.zip")
+
+    _save_model_info(save_dir, algo_name, df)
+
+    train_env.close()
+    eval_env.close()
+
+
+def _save_model_info(save_dir: str, algorithm: str, df) -> None:
+    """Save model_info.json — read by deploy/predictor.py for obs feature order."""
+    import gymnasium as gym
+
+    try:
+        import gym_trading_env  # noqa: F401
+
+        env = gym.make(
+            "TradingEnv",
+            name="INFO_PROBE",
+            df=df.copy(),
+            positions=config.POSITIONS,
+            trading_fees=config.TRADING_FEES,
+            borrow_interest_rate=config.BORROW_INTEREST_RATE,
+            portfolio_initial_value=config.PORTFOLIO_INITIAL_VALUE,
+            max_episode_duration=100,
+            verbose=0,
+        )
+        raw = env.unwrapped
+        obs_features = list(
+            getattr(
+                raw,
+                "_obs_features",
+                getattr(
+                    raw,
+                    "obs_features",
+                    [c for c in raw.df.columns if c.startswith("feature_")],
+                ),
+            )
+        )
+        env.close()
+    except Exception as e:
+        print(f"  ⚠  TradingEnv probe failed ({e}) — using pipeline fallback")
+        obs_features = [c for c in df.columns if c.startswith("feature_")]
+        if "feature_close_pct" not in obs_features:
+            obs_features.append("feature_close_pct")
+
+    info = {
+        "algorithm": algorithm,
+        "obs_features": obs_features,
+        "n_features": len(obs_features),
+        "positions": list(config.POSITIONS),
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+    }
+    info_path = os.path.join(save_dir, "model_info.json")
+    with open(info_path, "w") as f:
+        json.dump(info, f, indent=2)
+    print(f"  ✅ model_info.json: {info_path} ({len(obs_features)} features)")
+
+
+def run_all_phases(phases: list = None) -> None:
+    """
+    Run all training phases defined in config.TRAINING_PHASES.
+    Called automatically by: python run.py train
+    """
+    phases = phases or getattr(config, "TRAINING_PHASES", [])
+
+    if not phases:
+        print("No TRAINING_PHASES in config.py — running single train()")
+        train()
+        return
+
+    active_count = sum(1 for p in phases if not p.get("skip", False))
+    print(f"\n{'═'*55}")
+    print(f"  AUTOMATED TRAINING — {active_count}/{len(phases)} phases active")
+    for i, p in enumerate(phases):
+        status = "SKIP" if p.get("skip") else f"phase {i+1}"
+        overrides = p.get("ppo_config", {})
+        override_str = ""
+        if overrides:
+            override_str = (
+                "  [" + ", ".join(f"{k}={v}" for k, v in overrides.items()) + "]"
+            )
+        print(f"    [{status:>7}]  {p['name']}{override_str}")
+    print(f"{'═'*55}")
+
+    for phase in phases:
+        train_phase(phase)
+
+    print(f"\n{'═'*55}")
+    print(f"  ✅ All training complete")
+    print(f"{'═'*55}")

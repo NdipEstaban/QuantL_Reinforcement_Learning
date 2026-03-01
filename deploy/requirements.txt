@@ -1,0 +1,21 @@
+# deploy/requirements.txt
+# Dependencies for the ForexRL FastAPI bridge
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+
+# ML
+stable-baselines3>=2.2.0
+sb3-contrib>=2.2.0          # RecurrentPPO
+torch>=2.0.0                # CPU-only is fine for inference
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Gym
+gym-trading-env>=0.2.0
+gymnasium>=0.29.0
+
+# Utils
+pytz>=2023.3
+python-multipart>=0.0.7     # for form uploads if needed

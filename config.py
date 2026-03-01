@@ -92,3 +92,77 @@ PPO_CONFIG = {
 BASE_TF = "M15"
 TRAIN_TEST_SPLIT = 0.80
 WFO_FOLDS = 5
+
+# ── MULTI-MODEL / VERSIONING ──────────────────────────────────────
+# Default model served by the /predict (compat) endpoint.
+# Format: "algo/version" matching models/{algo}/{version}/
+DEFAULT_MODEL = "rppo/v1"
+
+# ── AUTOMATED 3-PHASE TRAINING ────────────────────────────────────
+# Each phase builds on the previous. Run all with: python run.py train
+# Set a phase's "skip": True to skip it during automated runs.
+TRAINING_PHASES = [
+    {
+        "name": "phase1_foundation",
+        "description": "Foundation — broad market structure on 2010-2016 data",
+        "algorithm": "RecurrentPPO",
+        "data_file": "data/raw/EURUSD_M15_2010-2016.csv",
+        "timesteps": 2_000_000,
+        "resume_from": None,  # start fresh
+        "save_to": "models/rppo/v1",
+        "skip": False,
+        # Phase 1: higher entropy + larger LR to explore broadly
+        "ppo_config": {
+            "n_steps": 2048,
+            "batch_size": 384,
+            "n_epochs": 5,
+            "gamma": 0.98,
+            "gae_lambda": 0.95,
+            "ent_coef": 0.08,
+            "learning_rate": 0.00003,
+            "clip_range": 0.08,
+        },
+    },
+    {
+        "name": "phase2_general",
+        "description": "General fine-tune on full 2010-2024 training set",
+        "algorithm": "RecurrentPPO",
+        "data_file": "data/raw/EURUSD_2022-2023_M15.csv",
+        "timesteps": 500_000,
+        "resume_from": "models/rppo/v1/final_model.zip",
+        "save_to": "models/rppo/v1",
+        "skip": False,
+        # Phase 2: lower LR + entropy to refine without forgetting phase 1
+        "ppo_config": {
+            "n_steps": 2048,
+            "batch_size": 384,
+            "n_epochs": 5,
+            "gamma": 0.98,
+            "gae_lambda": 0.95,
+            "ent_coef": 0.04,
+            "learning_rate": 0.00001,
+            "clip_range": 0.05,
+        },
+    },
+    {
+        "name": "phase3_recent",
+        "description": "Recent fine-tune on 2025 unseen data",
+        "algorithm": "RecurrentPPO",
+        "data_file": "data/unseen/EURUSD_2024_M15_fixed.csv",
+        "timesteps": 200_000,
+        "resume_from": "models/rppo/v1/final_model.zip",
+        "save_to": "models/rppo/v1",
+        "skip": False,
+        # Phase 3: very small LR — minimal updates to adapt to recent regime only
+        "ppo_config": {
+            "n_steps": 2048,
+            "batch_size": 384,
+            "n_epochs": 3,
+            "gamma": 0.98,
+            "gae_lambda": 0.95,
+            "ent_coef": 0.02,
+            "learning_rate": 0.000005,
+            "clip_range": 0.03,
+        },
+    },
+]

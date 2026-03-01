@@ -59,9 +59,9 @@ def cmd_features(args):
 
 
 def cmd_train(args):
-    from training.train import train
+    from training.train import run_all_phases
 
-    train()
+    run_all_phases()
 
 
 def cmd_backtest(args):
