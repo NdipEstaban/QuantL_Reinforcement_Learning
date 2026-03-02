@@ -39,13 +39,16 @@
     "feature_bb_50_dist",
     "feature_bb_correct_side",
     "feature_session",
-    "feature_killzone_active"
+    "feature_killzone_active",
+    "feature_close_pct",
+    "feature_portfolio_distribution"
   ],
-  "n_features": 39,
+  "n_features": 41,
   "positions": [
     -1,
     0,
     1
   ],
-  "trained_at": "2026-03-01T12:47:35.448830+00:00"
+  "trained_at": "2026-03-01T23:14:16.802141+00:00",
+  "note": "obs_features order is critical \u2014 must match gym-trading-env column order. Do NOT sort. Regenerate this file if the feature pipeline changes."
 }

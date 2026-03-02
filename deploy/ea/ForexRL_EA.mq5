@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|  ForexRL_EA.mq5                                                  |
-//|  RPPO-powered Expert Advisor — v2.0                              |
-//|  Multi-model support + HistorySelect fix                         |
+//|  RPPO-powered Expert Advisor — v2.1                              |
+//|  Model-exit mode: model controls all exits, catastrophic SL only |
 //+------------------------------------------------------------------+
 #property copyright "ForexRL"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -24,7 +24,7 @@ input string   ModelAlgo        = "rppo";  // Algorithm: rppo, ppo, a2c
 input string   ModelVersion     = "v1";    // Version: v1, v2, …
 
 input group "=== Trading ==="
-input string   Symbol_          = "EURUSD";      // Symbol
+input string   BaseSymbol       = "EURUSD";      // Base symbol to search for (e.g. EURUSD, BTCUSD)
 input ENUM_TIMEFRAMES Timeframe = PERIOD_M15;    // Timeframe
 input double   StartingBalance  = 10000.0;       // Starting balance ($) for ratchet
 input bool     TradeLongsOnly   = false;         // Only take long signals
@@ -42,6 +42,12 @@ input int      LondonEnd        = 10;            // London killzone end   (UTC h
 input int      NYStart          = 12;            // NY killzone start     (UTC hr)
 input int      NYEnd            = 15;            // NY killzone end       (UTC hr)
 
+input group "=== Exit Mode ==="
+input bool     UseModelExit     = true;          // true=model controls exit (no TP, wide SL)
+                                                  // false=fixed SL/TP from bridge
+input double   CatastrophicATR  = 10.0;          // ATR multiplier for catastrophic SL
+                                                  // (model-exit mode only — black swan guard)
+
 input group "=== Debug ==="
 input bool     VerboseLogging   = true;          // Print detailed logs
 input bool     SignalOnly       = false;         // Signal log only, no execution
@@ -50,6 +56,7 @@ input bool     SignalOnly       = false;         // Signal log only, no executio
 //| GLOBALS                                                          |
 //+------------------------------------------------------------------+
 CTrade    Trade;
+string    Symbol_       = "";   // Resolved at OnInit() — do not edit
 string    LastSignalID  = "";
 int       LastAction    = 0;
 datetime  LastBarTime   = 0;
@@ -72,18 +79,61 @@ int OnInit() {
 
    IsReset = true;
 
-   PrintFormat("[ForexRL] EA v2.0 | Session: %s | URL: %s | Model: %s/v%s",
-               SessionID, BridgeURL, ModelAlgo, ModelVersion);
+   // ── Auto-detect broker symbol name ────────────────────────────
+   // Brokers append suffixes: EURUSDz, EURUSDpro, EURUSD., EURUSD+, etc.
+   // Scan Market Watch for any symbol containing BaseSymbol string.
+   // Falls back to the current chart symbol if nothing found.
+   Symbol_ = DetectSymbol(BaseSymbol);
+   if (Symbol_ == "") {
+      PrintFormat("[ForexRL] WARNING: Could not find '%s' in Market Watch — "
+                  "using chart symbol '%s'", BaseSymbol, _Symbol);
+      Symbol_ = _Symbol;
+   }
+
+   PrintFormat("[ForexRL] EA v2.0 | Session: %s | URL: %s | Model: %s/v%s | Symbol: %s",
+               SessionID, BridgeURL, ModelAlgo, ModelVersion, Symbol_);
 
    if (!PingBridge()) {
       Alert("[ForexRL] WARNING: Bridge not reachable at " + BridgeURL +
             "\nEA loaded but will not trade until bridge is online.");
    }
 
-   int utc_offset = (int)(TimeCurrent() - TimeGMT());
-   PrintFormat("[ForexRL] Broker time offset from UTC: %+d hours", utc_offset / 3600);
-
    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| AUTO-DETECT BROKER SYMBOL                                        |
+//| Scans Market Watch for any symbol containing BaseSymbol string.  |
+//| Priority: 1. exact match  2. shortest name (least broker suffix) |
+//+------------------------------------------------------------------+
+string DetectSymbol(string base) {
+   string best    = "";
+   int    bestLen = 999;
+   int    total   = SymbolsTotal(true);   // true = Market Watch only
+
+   for (int i = 0; i < total; i++) {
+      string sym      = SymbolName(i, true);
+      string symUpper = sym;
+      string baseUpper= base;
+      StringToUpper(symUpper);
+      StringToUpper(baseUpper);
+
+      if (StringFind(symUpper, baseUpper) >= 0) {
+         if (symUpper == baseUpper) {
+            PrintFormat("[ForexRL] Symbol exact match: '%s'", sym);
+            return sym;   // exact match — done immediately
+         }
+         if (StringLen(sym) < bestLen) {
+            best    = sym;
+            bestLen = StringLen(sym);
+         }
+      }
+   }
+
+   if (best != "")
+      PrintFormat("[ForexRL] Symbol fuzzy match: '%s' (base: '%s')", best, base);
+
+   return best;
 }
 
 //+------------------------------------------------------------------+
@@ -122,29 +172,38 @@ void OnTick() {
    string response = "";
    if (!RequestPrediction(response)) return;
 
-   int    action         = 0;
-   double riskPct        = 0.15;
-   double slPips         = 30.0;
-   double tpPips         = 90.0;
-   double atrPips        = 10.0;
-   double confidence     = 0.5;
-   int    killzoneActive = 0;
-   string signalID       = "";
-   double slPrice        = 0.0;
-   string slType         = "";
+   int    action            = 0;
+   double riskPct           = 0.15;
+   double slPips            = 30.0;
+   double tpPips            = 90.0;
+   double catSlPips         = 200.0;
+   double catSlPrice        = 0.0;
+   double atrPips           = 10.0;
+   double confidence        = 0.5;
+   int    killzoneActive    = 0;
+   string signalID          = "";
+   double slPrice           = 0.0;
+   string slType            = "";
 
    if (!ParsePrediction(response, action, riskPct, slPips, tpPips,
-                        atrPips, confidence, killzoneActive, signalID,
-                        slPrice, slType)) {
+                        catSlPips, catSlPrice, atrPips, confidence,
+                        killzoneActive, signalID, slPrice, slType)) {
       Print("[ForexRL] Failed to parse bridge response");
       return;
    }
 
-   if (VerboseLogging)
-      PrintFormat("[ForexRL] Signal | Action: %+d | Risk: %.0f%% | "
-                  "SL: %.1fpips(%.5f/%s) | TP: %.1f | Conf: %.2f | KZ: %d | ID: %s",
-                  action, riskPct * 100, slPips, slPrice, slType,
-                  tpPips, confidence, killzoneActive, signalID);
+   if (VerboseLogging) {
+      if (UseModelExit)
+         PrintFormat("[ForexRL] Signal | Action: %+d | Risk: %.0f%% | "
+                     "CatSL: %.1fpips(%.5f) | Conf: %.2f | KZ: %d | ID: %s [MODEL EXIT]",
+                     action, riskPct * 100, catSlPips, catSlPrice,
+                     confidence, killzoneActive, signalID);
+      else
+         PrintFormat("[ForexRL] Signal | Action: %+d | Risk: %.0f%% | "
+                     "SL: %.1fpips(%.5f/%s) | TP: %.1f | Conf: %.2f | KZ: %d | ID: %s",
+                     action, riskPct * 100, slPips, slPrice, slType,
+                     tpPips, confidence, killzoneActive, signalID);
+   }
 
    if (action ==  1 && TradeShortsOnly) return;
    if (action == -1 && TradeLongsOnly)  return;
@@ -152,7 +211,8 @@ void OnTick() {
    if (UseManualRisk) riskPct = ManualRiskPct / 100.0;
 
    if (!SignalOnly) {
-      ExecuteSignal(action, riskPct, slPips, tpPips, signalID, slPrice);
+      ExecuteSignal(action, riskPct, slPips, tpPips,
+                    catSlPips, catSlPrice, signalID, slPrice);
    }
 
    LastAction   = action;
@@ -216,14 +276,9 @@ string BuildCandlesJSON(int count) {
       return "";
    }
 
-   // Calculate broker UTC offset once per call
-   // iTime() returns broker time; we need UTC for the Python pipeline
-   int utc_offset = (int)(TimeCurrent() - TimeGMT());
-
    string json = "[";
    for (int i = bars; i >= 1; i--) {
-      datetime broker_time = iTime  (Symbol_, Timeframe, i);
-      datetime utc_time    = broker_time - utc_offset;   // convert to UTC
+      datetime t = iTime  (Symbol_, Timeframe, i);
       double   o = iOpen  (Symbol_, Timeframe, i);
       double   h = iHigh  (Symbol_, Timeframe, i);
       double   l = iLow   (Symbol_, Timeframe, i);
@@ -233,7 +288,7 @@ string BuildCandlesJSON(int count) {
       json += StringFormat(
          "{\"time\":%d,\"open\":%.5f,\"high\":%.5f,"
           "\"low\":%.5f,\"close\":%.5f,\"volume\":%d}",
-         (int)utc_time, o, h, l, c, (int)v
+         (int)t, o, h, l, c, (int)v
       );
       if (i > 1) json += ",";
    }
@@ -245,79 +300,141 @@ string BuildCandlesJSON(int count) {
 //| PARSE JSON RESPONSE                                              |
 //+------------------------------------------------------------------+
 bool ParsePrediction(const string &resp,
-                     int &action, double &riskPct, double &slPips,
-                     double &tpPips, double &atrPips, double &confidence,
-                     int &killzone, string &signalID,
-                     double &slPrice, string &slType) {
-   action    = (int)ParseJSONInt   (resp, "action");
-   riskPct   =      ParseJSONDouble(resp, "risk_pct");
-   slPips    =      ParseJSONDouble(resp, "sl_pips");
-   tpPips    =      ParseJSONDouble(resp, "tp_pips");
-   atrPips   =      ParseJSONDouble(resp, "atr_pips");
-   confidence=      ParseJSONDouble(resp, "confidence");
-   killzone  = (int)ParseJSONInt   (resp, "killzone_active");
-   signalID  =      ParseJSONString(resp, "signal_id");
-   slPrice   =      ParseJSONDouble(resp, "sl_price");   // structure-aware SL price
-   slType    =      ParseJSONString(resp, "sl_type");    // "ob_low"/"stl"/"atr_default"
+                     int    &action,    double &riskPct,
+                     double &slPips,    double &tpPips,
+                     double &catSlPips, double &catSlPrice,
+                     double &atrPips,   double &confidence,
+                     int    &killzone,  string &signalID,
+                     double &slPrice,   string &slType) {
+   action      = (int)ParseJSONInt   (resp, "action");
+   riskPct     =      ParseJSONDouble(resp, "risk_pct");
+   slPips      =      ParseJSONDouble(resp, "sl_pips");
+   tpPips      =      ParseJSONDouble(resp, "tp_pips");
+   catSlPips   =      ParseJSONDouble(resp, "catastrophic_sl_pips");
+   catSlPrice  =      ParseJSONDouble(resp, "catastrophic_sl_price");
+   atrPips     =      ParseJSONDouble(resp, "atr_pips");
+   confidence  =      ParseJSONDouble(resp, "confidence");
+   killzone    = (int)ParseJSONInt   (resp, "killzone_active");
+   signalID    =      ParseJSONString(resp, "signal_id");
+   slPrice     =      ParseJSONDouble(resp, "sl_price");
+   slType      =      ParseJSONString(resp, "sl_type");
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| EXECUTE SIGNAL                                                   |
+//|                                                                  |
+//| UseModelExit=true  → No TP. Model exits by switching action.    |
+//|   Only wide catastrophic SL set as black-swan guard.            |
+//| UseModelExit=false → Fixed SL/TP from bridge (structure-based). |
 //+------------------------------------------------------------------+
-void ExecuteSignal(int action, double riskPct, double slPips,
-                   double tpPips, string signalID,
-                   double slPriceFromBridge = 0.0) {
+void ExecuteSignal(int action, double riskPct,
+                   double slPips,    double tpPips,
+                   double catSlPips, double catSlPrice,
+                   string signalID,  double slPriceFixed = 0.0) {
+
    bool hasLong  = PositionSelect(Symbol_) &&
                    PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
    bool hasShort = PositionSelect(Symbol_) &&
                    PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL;
 
-   double pip   = GetPipSize();
-   double price = 0;
-   double sl    = 0, tp = 0;
-   double lots  = 0;
+   double pip = GetPipSize();
+   double price, sl, tp, lots;
 
-   if (action ==  1 && hasShort) CloseAllPositions();
-   if (action == -1 && hasLong)  CloseAllPositions();
+   // ── MODEL EXIT MODE ────────────────────────────────────────────
+   // The model was trained without SL/TP — it learned to hold positions
+   // through drawdowns and exit when structure invalidates. Replicating
+   // that here gives the model full control, matching training exactly.
+   if (UseModelExit) {
 
-   if (action == 1 && !hasLong) {
-      price = SymbolInfoDouble(Symbol_, SYMBOL_ASK);
-      // Prefer bridge SL price (structure-based) if valid; fallback to pips
-      if (slPriceFromBridge > 0 && slPriceFromBridge < price)
-         sl = slPriceFromBridge;
-      else
-         sl = price - slPips * pip;
-      tp   = price + tpPips * pip;
-      lots = CalculateLots(riskPct, MathAbs(price - sl) / pip);
-      if (lots <= 0) return;
-
-      if (Trade.Buy(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
-         TotalTrades++;
-         PrintFormat("[ForexRL] BUY  | lots=%.2f | sl=%.5f | tp=%.5f | %s",
-                     lots, sl, tp, signalID);
+      // action=0 → model says flat: close any open position
+      if (action == 0) {
+         if (hasLong || hasShort) {
+            CloseAllPositions();
+            PrintFormat("[ForexRL] CLOSE | Model exit (flat signal) | %s", signalID);
+         }
+         return;
       }
-   }
 
-   if (action == -1 && !hasShort) {
-      price = SymbolInfoDouble(Symbol_, SYMBOL_BID);
-      if (slPriceFromBridge > 0 && slPriceFromBridge > price)
-         sl = slPriceFromBridge;
-      else
-         sl = price + slPips * pip;
-      tp   = price - tpPips * pip;
-      lots = CalculateLots(riskPct, MathAbs(sl - price) / pip);
-      if (lots <= 0) return;
-
-      if (Trade.Sell(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
-         TotalTrades++;
-         PrintFormat("[ForexRL] SELL | lots=%.2f | sl=%.5f | tp=%.5f | %s",
-                     lots, sl, tp, signalID);
+      // Direction flip: close existing before opening opposite
+      if (action ==  1 && hasShort) {
+         CloseAllPositions();
+         PrintFormat("[ForexRL] FLIP SHORT→LONG | Model exit triggered close | %s", signalID);
+         hasShort = false;
       }
-   }
+      if (action == -1 && hasLong) {
+         CloseAllPositions();
+         PrintFormat("[ForexRL] FLIP LONG→SHORT | Model exit triggered close | %s", signalID);
+         hasLong = false;
+      }
 
-   if (action == 0) {
-      CloseAllPositions();
+      // Open LONG — no TP, catastrophic SL only
+      if (action == 1 && !hasLong) {
+         price = SymbolInfoDouble(Symbol_, SYMBOL_ASK);
+         sl    = (catSlPrice > 0 && catSlPrice < price)
+                  ? catSlPrice
+                  : price - catSlPips * pip;
+         tp    = 0;   // model controls exit — no TP
+         lots  = CalculateLots(riskPct, MathAbs(price - sl) / pip);
+         if (lots <= 0) return;
+         if (Trade.Buy(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
+            TotalTrades++;
+            PrintFormat("[ForexRL] BUY  [model-exit] | lots=%.2f | cat_sl=%.5f | no TP | %s",
+                        lots, sl, signalID);
+         }
+      }
+
+      // Open SHORT — no TP, catastrophic SL only
+      if (action == -1 && !hasShort) {
+         price = SymbolInfoDouble(Symbol_, SYMBOL_BID);
+         sl    = (catSlPrice > 0 && catSlPrice > price)
+                  ? catSlPrice
+                  : price + catSlPips * pip;
+         tp    = 0;   // model controls exit — no TP
+         lots  = CalculateLots(riskPct, MathAbs(sl - price) / pip);
+         if (lots <= 0) return;
+         if (Trade.Sell(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
+            TotalTrades++;
+            PrintFormat("[ForexRL] SELL [model-exit] | lots=%.2f | cat_sl=%.5f | no TP | %s",
+                        lots, sl, signalID);
+         }
+      }
+
+   // ── FIXED SL/TP MODE ───────────────────────────────────────────
+   } else {
+
+      if (action ==  1 && hasShort) CloseAllPositions();
+      if (action == -1 && hasLong)  CloseAllPositions();
+
+      if (action == 1 && !hasLong) {
+         price = SymbolInfoDouble(Symbol_, SYMBOL_ASK);
+         sl    = (slPriceFixed > 0 && slPriceFixed < price)
+                  ? slPriceFixed : price - slPips * pip;
+         tp    = price + tpPips * pip;
+         lots  = CalculateLots(riskPct, MathAbs(price - sl) / pip);
+         if (lots <= 0) return;
+         if (Trade.Buy(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
+            TotalTrades++;
+            PrintFormat("[ForexRL] BUY  | lots=%.2f | sl=%.5f | tp=%.5f | %s",
+                        lots, sl, tp, signalID);
+         }
+      }
+
+      if (action == -1 && !hasShort) {
+         price = SymbolInfoDouble(Symbol_, SYMBOL_BID);
+         sl    = (slPriceFixed > 0 && slPriceFixed > price)
+                  ? slPriceFixed : price + slPips * pip;
+         tp    = price - tpPips * pip;
+         lots  = CalculateLots(riskPct, MathAbs(sl - price) / pip);
+         if (lots <= 0) return;
+         if (Trade.Sell(lots, Symbol_, price, sl, tp, "ForexRL|" + signalID)) {
+            TotalTrades++;
+            PrintFormat("[ForexRL] SELL | lots=%.2f | sl=%.5f | tp=%.5f | %s",
+                        lots, sl, tp, signalID);
+         }
+      }
+
+      if (action == 0) CloseAllPositions();
    }
 }
 

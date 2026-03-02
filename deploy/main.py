@@ -128,16 +128,21 @@ class PredictResponse(BaseModel):
     action: int  # -1 SHORT / 0 FLAT / +1 LONG
     action_index: int  # raw model output 0/1/2 (debug)
     risk_pct: float
-    sl_pips: float
-    tp_pips: float
-    sl_price: float
-    sl_type: str
+    # ── Fixed SL/TP mode (UseModelExit=false) ──────────────────────────────
+    sl_pips: float  # structure-aware SL distance
+    tp_pips: float  # fixed TP = sl_pips × MIN_RR_RATIO
+    sl_price: float  # exact SL price level
+    sl_type: str  # "ob_low"/"stl"/"atr_default"/"atr_cap"
+    # ── Model-exit mode (UseModelExit=true) ────────────────────────────────
+    catastrophic_sl_pips: float  # wide black-swan SL — rarely fires
+    catastrophic_sl_price: float  # exact catastrophic SL price level
+    # ── Common ─────────────────────────────────────────────────────────────
     atr_pips: float
     confidence: float
     bias_aligned: float
     killzone_active: int
     signal_id: str
-    model: str  # "rppo/v1"
+    model: str
     timestamp: str
 
 
@@ -206,6 +211,8 @@ async def _run_prediction(
         tp_pips=result["tp_pips"],
         sl_price=result["sl_price"],
         sl_type=result["sl_type"],
+        catastrophic_sl_pips=result["catastrophic_sl_pips"],
+        catastrophic_sl_price=result["catastrophic_sl_price"],
         atr_pips=result["atr_pips"],
         confidence=result["confidence"],
         bias_aligned=result["bias_aligned"],
@@ -287,11 +294,19 @@ async def predict_versioned(
     try:
         return await _run_prediction(req, algo, version_str)
     except KeyError as e:
+        log.error(f"Model not found: {e}")
         raise HTTPException(404, str(e))
     except ValueError as e:
+        log.error(f"Prediction ValueError: {e}")
         raise HTTPException(400, str(e))
     except RuntimeError as e:
+        log.error(f"Prediction RuntimeError: {e}")
         raise HTTPException(503, str(e))
+    except Exception as e:
+        log.error(
+            f"Prediction unexpected error: {type(e).__name__}: {e}", exc_info=True
+        )
+        raise HTTPException(500, str(e))
 
 
 @app.post("/predict", response_model=PredictResponse)
@@ -306,9 +321,16 @@ async def predict_default(req: PredictRequest) -> PredictResponse:
     try:
         return await _run_prediction(req, algo, version)
     except ValueError as e:
+        log.error(f"Prediction ValueError: {e}")
         raise HTTPException(400, str(e))
     except RuntimeError as e:
+        log.error(f"Prediction RuntimeError: {e}")
         raise HTTPException(503, str(e))
+    except Exception as e:
+        log.error(
+            f"Prediction unexpected error: {type(e).__name__}: {e}", exc_info=True
+        )
+        raise HTTPException(500, str(e))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

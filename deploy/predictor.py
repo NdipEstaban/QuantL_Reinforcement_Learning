@@ -202,6 +202,8 @@ class Predictor:
             cols = [c for c in df.columns if c.startswith("feature_")]
             if "feature_close_pct" not in cols:
                 cols.append("feature_close_pct")
+            if "feature_portfolio_distribution" not in cols:
+                cols.append("feature_portfolio_distribution")
             self._obs_features = cols
         except Exception:
             self._obs_features = [
@@ -245,6 +247,7 @@ class Predictor:
                 "feature_session",
                 "feature_killzone_active",
                 "feature_close_pct",
+                "feature_portfolio_distribution",
             ]
 
     # ── LSTM ──────────────────────────────────────────────────────────────────
@@ -295,10 +298,20 @@ class Predictor:
         df = add_breaker_block_features(df)
         df = add_session_features(df)
 
-        # CRITICAL: gym-trading-env appends this before building obs space.
-        # Model was trained with it — must be present or observation shape is wrong.
+        # CRITICAL: gym-trading-env appends TWO internal columns before building
+        # the observation space. Both must be present or shape will be wrong.
+        #
+        # 1. feature_close_pct — percentage change of close price
+        # 2. feature_portfolio_distribution — current position value (-1/0/1)
+        #    During training this is the actual env position.
+        #    During live inference we use current_position passed from the EA.
         if "feature_close_pct" not in df.columns:
             df["feature_close_pct"] = df["close"].pct_change().fillna(0)
+
+        # position is stored per-call via _current_position set before _run_pipeline
+        if "feature_portfolio_distribution" not in df.columns:
+            pos = getattr(self, "_current_position", 0)
+            df["feature_portfolio_distribution"] = float(pos)
 
         df = df.replace([float("inf"), float("-inf")], float("nan"))
         df = df.dropna()
@@ -377,6 +390,9 @@ class Predictor:
         if not self._loaded:
             raise RuntimeError(f"[{self.key}] Not loaded")
 
+        # Store current_position so _run_pipeline can access it for
+        # feature_portfolio_distribution (gym-trading-env internal column)
+        self._current_position = current_position
         processed = self._run_pipeline(df.copy())
         if len(processed) == 0:
             raise ValueError(f"[{self.key}] Empty DataFrame after pipeline")
@@ -415,7 +431,7 @@ class Predictor:
 
         import config
 
-        sl_atr = config.CATASTROPHIC_SL_ATR
+        sl_atr = config.CATASTROPHIC_SL_ATR  # e.g. 10.0 — black swan only
         rr = config.MIN_RR_RATIO
 
         from env.trading_env import get_sl_price
@@ -423,6 +439,7 @@ class Predictor:
         features_d = {c: float(last[c]) for c in last.index if c.startswith("feature_")}
         internal_d = {c: float(last[c]) for c in last.index if c.startswith("_")}
 
+        # ── Structure-aware SL (used when fixed SL/TP mode is active) ─────────
         if action_value != 0:
             sl_price, sl_type = get_sl_price(
                 action_value, features_d, internal_d, close_raw
@@ -440,15 +457,37 @@ class Predictor:
         sl_pips = round(abs(close_raw - sl_price) * self.PIPS_PER_UNIT, 1)
         tp_pips = round(sl_pips * rr, 1)
 
+        # ── Catastrophic SL — black swan protection for model-exit mode ────────
+        # Much wider than structure SL. Should almost never fire in normal
+        # operation — only exists to prevent account blowup on gap events.
+        # In model-exit mode the EA uses this instead of sl_pips/tp_pips.
+        cat_sl_raw = sl_atr * atr_raw  # e.g. 10 × ATR
+        cat_sl_pips = round(cat_sl_raw * self.PIPS_PER_UNIT, 1)
+
+        # Catastrophic SL price levels
+        if action_value == 1:  # LONG — SL below entry
+            cat_sl_price = round(close_raw - cat_sl_raw, 5)
+        elif action_value == -1:  # SHORT — SL above entry
+            cat_sl_price = round(close_raw + cat_sl_raw, 5)
+        else:
+            cat_sl_price = 0.0
+
         return {
             "action": action_value,
             "action_index": action_index,
             "confidence": confidence,
+            # ── Fixed SL/TP mode (UseModelExit=false in EA) ───────────────────
             "sl_pips": max(sl_pips, 5.0),
             "tp_pips": max(tp_pips, 15.0),
-            "atr_pips": atr_pips,
             "sl_price": round(sl_price, 5),
             "sl_type": sl_type,
+            # ── Model-exit mode (UseModelExit=true in EA) ─────────────────────
+            # EA opens with no TP, only this wide catastrophic SL.
+            # Model closes the trade by switching action to 0 or -1/+1.
+            "catastrophic_sl_pips": max(cat_sl_pips, 20.0),
+            "catastrophic_sl_price": cat_sl_price,
+            # ── Common fields ─────────────────────────────────────────────────
+            "atr_pips": atr_pips,
             "bias_aligned": float(features_d.get("feature_bias_aligned", 0)),
             "killzone_active": int(features_d.get("feature_killzone_active", 0)),
             "last_close": close_raw,

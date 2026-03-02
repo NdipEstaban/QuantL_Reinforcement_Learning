@@ -68,9 +68,9 @@ N_ENVS = 6
 
 # ── TRAINING ─────────────────────────────────────────────────────
 TOTAL_TIMESTEPS = 500_000  # Phase 2 fine-tune budget
-ALGORITHM = "RecurrentPPO"
+ALGORITHM = "RecurrentPPO"  # RecurrentPPO or PPO
 CHECKPOINT_FREQ = 100_000
-MODEL_SAVE_PATH = "models/forex_ppo"
+MODEL_SAVE_PATH = "models/ppo/v1"
 LOG_DIR = "logs/"
 
 # ── RECURRENT PPO ─────────────────────────────────────────────────

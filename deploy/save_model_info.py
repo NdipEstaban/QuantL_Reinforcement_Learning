@@ -57,6 +57,11 @@ def get_obs_features_from_env(df) -> list[str]:
     else:
         features = [c for c in raw.df.columns if c.startswith("feature_")]
     env.close()
+    # Ensure both gym-trading-env internal columns are present
+    if "feature_close_pct" not in features:
+        features.append("feature_close_pct")
+    if "feature_portfolio_distribution" not in features:
+        features.append("feature_portfolio_distribution")
     return features
 
 
