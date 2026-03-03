@@ -239,13 +239,50 @@ class Predictor:
                 "feature_ob_position",
                 "feature_ob_correct_side",
                 "feature_ob_50_dist",
+                "feature_ob_dist_atr",
                 "feature_bb_active",
                 "feature_bb_direction",
                 "feature_bb_position",
                 "feature_bb_correct_side",
                 "feature_bb_50_dist",
+                # Liquidity pools (zones.py — add_liquidity_pool_features)
+                "feature_liq_above_count",
+                "feature_liq_below_count",
+                "feature_liq_above_dist",
+                "feature_liq_below_dist",
+                "feature_liq_above_viable",
+                "feature_liq_below_viable",
+                # Session + day reference levels (session.py)
                 "feature_session",
                 "feature_killzone_active",
+                "feature_pdh_dist",
+                "feature_pdl_dist",
+                "feature_prev_day_range_pct",
+                "feature_asian_high_dist",
+                "feature_asian_low_dist",
+                "feature_asian_range_pos",
+                "feature_midnight_open_dist",
+                # Candle anatomy (structure.py — add_candle_features)
+                "feature_body_ratio",
+                "feature_top_wick_ratio",
+                "feature_bot_wick_ratio",
+                "feature_candle_dir",
+                "feature_consec_bull",
+                "feature_consec_bear",
+                "feature_roc_1_atr",
+                "feature_roc_5_atr",
+                # Displacement quality (structure.py — add_displacement_features)
+                "feature_disp_3_atr",
+                "feature_disp_strong",
+                "feature_disp_bull",
+                "feature_disp_bear",
+                "feature_disp_impulse",
+                # Swing failure / sweep (structure.py — add_swing_failure_features)
+                "feature_sweep_bull",
+                "feature_sweep_bear",
+                "feature_sweep_bull_recent",
+                "feature_sweep_bear_recent",
+                # gym-trading-env internal columns (always last)
                 "feature_close_pct",
                 "feature_portfolio_distribution",
             ]
@@ -288,6 +325,7 @@ class Predictor:
             add_fvg_features,
             add_order_block_features,
             add_breaker_block_features,
+            add_liquidity_pool_features,
         )
         from features.session import add_session_features
 
@@ -296,6 +334,7 @@ class Predictor:
         df = add_structure_features(df)
         df = add_order_block_features(df)
         df = add_breaker_block_features(df)
+        df = add_liquidity_pool_features(df)
         df = add_session_features(df)
 
         # CRITICAL: gym-trading-env appends TWO internal columns before building
