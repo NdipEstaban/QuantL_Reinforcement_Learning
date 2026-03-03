@@ -280,7 +280,9 @@ def train_phase(phase: dict) -> None:
 
     from features.pipeline import load_and_process
 
-    df = load_and_process(data_file, save=False)
+    # force_reprocess=True in phase dict to bypass cache (e.g. after changing features)
+    force = phase.get("force_reprocess", False)
+    df = load_and_process(data_file, save=True, force=force)
     _, test_df = split_data(df)
 
     from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor

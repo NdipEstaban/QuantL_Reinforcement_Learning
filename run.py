@@ -150,7 +150,7 @@ def cmd_forwardtest(args):
     # Process features on the new data — same pipeline, no fitting
     print("\nRunning feature pipeline on new data...")
     df = load_and_process(
-        args.data, save=False
+        args.data, save=True
     )  # save=False — don't overwrite training data
     print(f"  Candles   : {len(df):,}")
     print(f"  Period    : {df.index[0]} → {df.index[-1]}")

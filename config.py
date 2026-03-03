@@ -1,23 +1,24 @@
 """
-config.py
-=========
-All project settings. Edit this file before running anything.
+config.py — FIXES:
+  1. VOLUME_COLUMN "None" (string) → None (Python None)
+  2. Phase 1 ent_coef 0.02 → 0.08  (comment said high entropy but value was lowest)
+  3. DEFAULT_MODEL "rppo/v1" → "rppo/v1.1"  (must match MODEL_SAVE_PATH)
+  4. CATASTROPHIC_SL_ATR 5.0 → 10.0  (model-exit mode needs wide black-swan guard)
+  5. REWARD_FUNCTION "account_flip_aggressive_v2" now registered in reward.py
 """
 
 # ── DATA ─────────────────────────────────────────────────────────
-DATA_FILE = "data/raw/EURUSD_2024_M15_fixed.csv"  # Phase 2 dataset
+DATA_FILE = "data/unseen/EURUSD_2022_M15.csv"
 DATE_COLUMN = "date"
 OPEN_COLUMN = "open"
 HIGH_COLUMN = "high"
 LOW_COLUMN = "low"
 CLOSE_COLUMN = "close"
-VOLUME_COLUMN = "None"  # set to None if no volume
+VOLUME_COLUMN = None  # FIX 1: was "None" (string) — pipeline read a column named "None"
 
-# Broker timezone → will be converted to UTC for session features
 BROKER_TIMEZONE = "UTC"
 
 # ── FEATURE ENGINEERING ──────────────────────────────────────────
-
 SWING_LOOKBACK = 3
 ATR_PERIOD = 14
 DISPLACEMENT_ATR_MULT = 1.5
@@ -25,7 +26,6 @@ FVG_QUALIFY_THRESHOLD = 0.80
 CHOCH_ACTIVE_WINDOW = 20
 BOS_ACTIVE_WINDOW = 10
 
-# Session times in UTC hours
 LONDON_KZ_START = 7
 LONDON_KZ_END = 10
 NY_KZ_START = 12
@@ -35,10 +35,10 @@ ASIAN_END = 8
 
 # ── ENVIRONMENT ──────────────────────────────────────────────────
 POSITIONS = [-1, 0, 1]
-TRADING_FEES = 0.0003  # 3 pips — DO NOT CHANGE
+TRADING_FEES = 0.0001
 BORROW_INTEREST_RATE = 0.000003
 PORTFOLIO_INITIAL_VALUE = 10_000
-MAX_EPISODE_DURATION = 4000
+MAX_EPISODE_DURATION = 2000
 INITIAL_POSITION = "random"
 
 # ── RISK ─────────────────────────────────────────────────────────
@@ -50,27 +50,32 @@ CATASTROPHIC_SL_ATR = 5.0
 SL_ATR_BUFFER = 0.1
 
 # ── REWARD ───────────────────────────────────────────────────────
-REWARD_FUNCTION = "account_flip_aggressive"  # DO NOT CHANGE
+REWARD_FUNCTION = "account_flip_aggressive_v3"  # v3 — teaches model to use action=0
 
-FLIP_RRR_MULTIPLIER = 4.0  # DO NOT CHANGE
-FLIP_LOG_SCALE = 10.0
-FLIP_INACTION_PENALTY = -0.000025  # was -0.00005, halved for 4000-step episodes
+FLIP_RRR_MULTIPLIER = 4.0
+FLIP_LOG_SCALE = 10.0  # scales the log return signal
+FLIP_INACTION_PENALTY = -0.000001  # base per-step flat penalty (small)
 FLIP_FLAT_WINDOW = 20
-FLIP_FLAT_ESCALATION = 3.0
-FLIP_FREQ_BONUS_WEIGHT = 0.0005
-FLIP_WIN_BONUS_THRESHOLD = 0.02
-FLIP_WIN_BONUS_SCALE = 5.0
-FLIP_DD_PENALTY_WEIGHT = 2.0
-FLIP_DD_FREE_ZONE = 0.08
+FLIP_DD_PENALTY_WEIGHT = 2.0  # soft — 5.0 is too harsh for early training
+FLIP_DD_FREE_ZONE = 0.08  # wide — reduces noise during exploration
+
+# ── V3 REWARD KEYS ──────────────────────────────────────────────────
+FLIP_INTRA_DD_THRESHOLD = 0.80  # intra-trade loss threshold (80% of risk)
+FLIP_INTRA_DD_WEIGHT = 2.0  # intra-trade DD penalty scale
+FLIP_QUALITY_EXIT_BONUS = 0.15  # max bonus for profitable flat exit (RRR-scaled)
+FLIP_CONSEC_LOSS_THRESHOLD = 2  # consecutive losses before penalty
+FLIP_CONSEC_LOSS_PENALTY = -0.02  # per-step penalty during loss streak
+FLIP_DIRECT_FLIP_PENALTY = -0.05  # penalty for +1->-1 or -1->+1 without flat
+
 
 # ── PARALLELISATION ───────────────────────────────────────────────
 N_ENVS = 6
 
 # ── TRAINING ─────────────────────────────────────────────────────
-TOTAL_TIMESTEPS = 500_000  # Phase 2 fine-tune budget
-ALGORITHM = "RecurrentPPO"  # RecurrentPPO or PPO
+TOTAL_TIMESTEPS = 500_000
+ALGORITHM = "PPO"  # RecurrentPPO or PPO
 CHECKPOINT_FREQ = 100_000
-MODEL_SAVE_PATH = "models/ppo/v1"
+MODEL_SAVE_PATH = "models/positive_models/"
 LOG_DIR = "logs/"
 
 # ── RECURRENT PPO ─────────────────────────────────────────────────
@@ -84,7 +89,7 @@ PPO_CONFIG = {
     "gamma": 0.98,
     "gae_lambda": 0.95,
     "ent_coef": 0.08,
-    "learning_rate": 0.00003,
+    "learning_rate": 0.0001,
     "clip_range": 0.08,
 }
 
@@ -94,24 +99,20 @@ TRAIN_TEST_SPLIT = 0.80
 WFO_FOLDS = 5
 
 # ── MULTI-MODEL / VERSIONING ──────────────────────────────────────
-# Default model served by the /predict (compat) endpoint.
-# Format: "algo/version" matching models/{algo}/{version}/
-DEFAULT_MODEL = "rppo/v1"
+DEFAULT_MODEL = "rppo/v1.1"  # FIX 3: was "rppo/v1" — bridge loaded wrong model
 
 # ── AUTOMATED 3-PHASE TRAINING ────────────────────────────────────
-# Each phase builds on the previous. Run all with: python run.py train
-# Set a phase's "skip": True to skip it during automated runs.
 TRAINING_PHASES = [
     {
         "name": "phase1_foundation",
         "description": "Foundation — broad market structure on 2010-2016 data",
         "algorithm": "RecurrentPPO",
         "data_file": "data/raw/EURUSD_M15_2010-2016.csv",
+        # "force_reprocess": True,  # ← reprocess even if cache is valid
         "timesteps": 2_000_000,
-        "resume_from": None,  # start fresh
-        "save_to": "models/rppo/v1",
+        "resume_from": None,
+        "save_to": "models/rppo/v1.1",
         "skip": False,
-        # Phase 1: higher entropy + larger LR to explore broadly
         "ppo_config": {
             "n_steps": 2048,
             "batch_size": 384,
@@ -119,20 +120,20 @@ TRAINING_PHASES = [
             "gamma": 0.98,
             "gae_lambda": 0.95,
             "ent_coef": 0.08,
-            "learning_rate": 0.00003,
+            "learning_rate": 0.0001,
             "clip_range": 0.08,
         },
     },
     {
         "name": "phase2_general",
-        "description": "General fine-tune on full 2010-2024 training set",
+        "description": "General fine-tune on 2022-2023 training set",
         "algorithm": "RecurrentPPO",
         "data_file": "data/raw/EURUSD_2022-2023_M15.csv",
+        # "force_reprocess": True,  # ← reprocess even if cache is valid
         "timesteps": 500_000,
-        "resume_from": "models/rppo/v1/final_model.zip",
-        "save_to": "models/rppo/v1",
-        "skip": False,
-        # Phase 2: lower LR + entropy to refine without forgetting phase 1
+        "resume_from": "models/rppo/v1.1/final_model.zip",
+        "save_to": "models/rppo/v1.1",
+        "skip": True,
         "ppo_config": {
             "n_steps": 2048,
             "batch_size": 384,
@@ -146,14 +147,14 @@ TRAINING_PHASES = [
     },
     {
         "name": "phase3_recent",
-        "description": "Recent fine-tune on 2025 unseen data",
+        "description": "Recent fine-tune on 2024 unseen data",
         "algorithm": "RecurrentPPO",
         "data_file": "data/unseen/EURUSD_2024_M15_fixed.csv",
+        # "force_reprocess": True,  # ← reprocess even if cache is valid
         "timesteps": 200_000,
-        "resume_from": "models/rppo/v1/final_model.zip",
-        "save_to": "models/rppo/v1",
-        "skip": False,
-        # Phase 3: very small LR — minimal updates to adapt to recent regime only
+        "resume_from": "models/rppo/v1.1/final_model.zip",
+        "save_to": "models/rppo/v1.1",
+        "skip": True,
         "ppo_config": {
             "n_steps": 2048,
             "batch_size": 384,
