@@ -93,11 +93,20 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Run all feature modules in the correct dependency order:
 
-    1. FVG first  (needed by ITH/ITL qualification in structure)
-    2. Structure  (STH/STL → ITH/ITL → LTH/LTL → BOS/CHoCH/Bias → Distances)
-    3. OB/BB      (needs structure levels + BOS flags)
-    4. Session    (needs DatetimeIndex)
-    5. Clean up   (drop NaN rows, drop internal _ columns from final output)
+    0. ATR           (base — every module depends on it)
+    1. FVG           (needed by ITH/ITL qualification in structure)
+    2. Structure     (STH/STL → ITH/ITL → LTH/LTL → BOS/CHoCH/Bias
+                      → Distances → Candles → Displacement → Sweeps)
+    3. OB/BB + Liq   (needs structure levels + BOS flags)
+    4. Session       (needs DatetimeIndex + _atr)
+    5. Cleanup       (drop NaN rows, keep _ cols for reference)
+
+    Feature count breakdown (approximate):
+        Structure  : 14 bias/BOS + 8 distances + 8 candle + 5 displacement + 4 sweep = 39
+        Zones      : 5 FVG + 6 OB + 5 BB + 6 liquidity = 22
+        Session    : 2 session + 7 day-reference = 9
+        ─────────────────────────────────────────────
+        TOTAL      : ~70 feature columns (up from ~35 in previous version)
     """
     print("\n=== Feature Pipeline ===")
 
@@ -114,18 +123,25 @@ def add_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df = add_fvg_features(df)
 
     # Step 2: Full structure (uses _fvg_* columns from step 1)
-    print("\n[2/4] Market Structure (STH/STL/ITH/ITL/LTH/LTL/BOS/CHoCH/Bias)...")
+    # Now includes: STH/STL/ITH/ITL/LTH/LTL + BOS/CHoCH/Bias
+    #               + Distances + Candle Anatomy + Displacement + Sweeps
+    print("\n[2/4] Market Structure...")
     df = add_structure_features(df)
 
-    # Step 3: OB + BB (needs _ith_price, _itl_price, BOS flags)
-    print("\n[3/4] Order Blocks + Breaker Blocks...")
-    from features.zones import add_order_block_features, add_breaker_block_features
+    # Step 3: OB + BB + Liquidity Pools (needs _ith_price, _itl_price, BOS flags)
+    print("\n[3/4] Order Blocks + Breaker Blocks + Liquidity Pools...")
+    from features.zones import (
+        add_order_block_features,
+        add_breaker_block_features,
+        add_liquidity_pool_features,
+    )
 
     df = add_order_block_features(df)
     df = add_breaker_block_features(df)
+    df = add_liquidity_pool_features(df)
 
-    # Step 4: Sessions
-    print("\n[4/4] Session / Killzone...")
+    # Step 4: Sessions + Day Reference Levels (needs _atr + DatetimeIndex)
+    print("\n[4/4] Session / Killzone / Day Reference Levels...")
     df = add_session_features(df)
 
     # ── Final cleanup ────────────────────────────────────
@@ -161,9 +177,7 @@ def _cache_path_for(data_path: str) -> str:
         data/raw/EURUSD_M15_2010-2016.csv  →  data/processed/EURUSD_M15_2010-2016.pkl
         data/unseen/EURUSD_2024_M15.csv    →  data/processed/EURUSD_2024_M15.pkl
     """
-    stem = os.path.splitext(os.path.basename(data_path))[
-        0
-    ]  # filename without extension
+    stem = os.path.splitext(os.path.basename(data_path))[0]
     return os.path.join("data", "processed", f"{stem}.pkl")
 
 
@@ -171,10 +185,7 @@ def _cache_is_valid(csv_path: str, cache_path: str) -> bool:
     """
     Return True if:
       1. The cache file exists, AND
-      2. The cache is newer than the source CSV (CSV hasn't been modified since)
-
-    This means: if you update the CSV or change feature code and delete the
-    cache, the pipeline will reprocess automatically next run.
+      2. The cache is newer than the source CSV
     """
     if not os.path.exists(cache_path):
         return False
@@ -196,20 +207,22 @@ def load_and_process(
       - Pass force=True to always reprocess and overwrite the cache.
 
     Cache location:  data/processed/<csv_stem>.pkl
-    Example:
-      data/raw/EURUSD_M15_2010-2016.csv  →  data/processed/EURUSD_M15_2010-2016.pkl
 
     Args:
         data_path : path to source CSV (defaults to config.DATA_FILE)
         save      : whether to save the cache after processing (default True)
         force     : if True, ignore existing cache and reprocess (default False)
+
+    NOTE: After updating features/structure.py, zones.py, or session.py,
+          delete the existing .pkl cache files or pass force=True.
+          The cache is keyed only on CSV modification time, not feature code.
     """
     data_path = data_path or config.DATA_FILE
     cache_path = _cache_path_for(data_path)
 
     if not force and _cache_is_valid(data_path, cache_path):
         print(f"\n[pipeline] Cache hit — loading from: {cache_path}")
-        print(f"           (delete this file to force reprocessing)")
+        print(f"           (delete this file or pass force=True to reprocess)")
         df = pd.read_pickle(cache_path)
         n_feat = len([c for c in df.columns if c.startswith("feature_")])
         print(f"           {len(df):,} candles | {n_feat} features")
@@ -260,7 +273,7 @@ def load_processed(path: str = None) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    df = load_and_process(save=True)
+    df = load_and_process(save=True, force=True)
     print(f"\nSample (last 3 rows):")
     feature_cols = [c for c in df.columns if c.startswith("feature_")]
     print(df[["close"] + feature_cols[:8]].tail(3).to_string())

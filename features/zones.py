@@ -1,7 +1,7 @@
 """
 features/zones.py
 ==================
-Fair Value Gap, Order Block, and Breaker Block detection.
+Fair Value Gap, Order Block, Breaker Block, and Liquidity Pool detection.
 
 FVG (Fair Value Gap)
 ────────────────────
@@ -36,6 +36,11 @@ The last series of opposing candles that failed to hold price after:
 
 A bullish breaker was originally a bearish OB that got broken above.
 A bearish breaker was originally a bullish OB that got broken below.
+
+NEW: Liquidity Pool Detection
+────────────────────────────────────
+Equal highs / equal lows within a tolerance band signal clustered stops.
+Price sweeping into these pools creates high-probability reversal setups.
 """
 
 import numpy as np
@@ -68,40 +73,35 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"].values
     atr = df["_atr"].values
 
-    # Internal arrays
     _fvg_top = np.full(n, np.nan)
     _fvg_bot = np.full(n, np.nan)
     _fvg_dir = np.zeros(n)
     _fvg_fill = np.full(n, np.nan)
 
-    # Feature arrays
     fvg_active = np.zeros(n)
     fvg_dir_feat = np.zeros(n)
     fvg_rebal = np.full(n, 0.0)
     fvg_pos = np.full(n, np.nan)
     dist_fvg = np.full(n, np.nan)
 
-    # Active FVG list: [top, bottom, direction, filled_pct]
     active = []
 
     for i in range(2, n):
 
-        # ── Detect new FVG ──────────────────────────────
         if low[i] > high[i - 2]:  # bullish gap
             active.append([low[i], high[i - 2], 1, 0.0])
         if high[i] < low[i - 2]:  # bearish gap
             active.append([low[i - 2], high[i], -1, 0.0])
 
-        # ── Update fill on all active FVGs ──────────────
         still_active = []
         for fvg in active:
             t, b, d, _ = fvg
             gap = t - b
             if gap <= 0:
                 continue
-            if d == 1:  # bullish: track how much price has come back down
+            if d == 1:
                 filled = np.clip((t - close[i]) / gap, 0.0, 1.0)
-            else:  # bearish: track how much price has come back up
+            else:
                 filled = np.clip((close[i] - b) / gap, 0.0, 1.0)
             fvg[3] = filled
             if filled < 1.0:
@@ -111,7 +111,6 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
         if not active:
             continue
 
-        # Use the most recently created active FVG
         best = active[-1]
         t, b, d, filled = best
 
@@ -153,8 +152,7 @@ def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _find_ob_at_swing_tip(
     tip_idx: int,
-    direction: int,  # +1 = swing HIGH tip → bearish OB (look for up-close candles)
-    # -1 = swing LOW  tip → bullish OB (look for down-close candles)
+    direction: int,
     open_arr: np.ndarray,
     close_arr: np.ndarray,
     high_arr: np.ndarray,
@@ -165,85 +163,45 @@ def _find_ob_at_swing_tip(
     At the confirmed swing tip (tip_idx), walk backwards and collect the
     CONSECUTIVE run of opposing candles immediately before the tip.
 
-    Rule:
-        If there are MULTIPLE consecutive opposing candles at the tip
-        → the entire series forms the OB zone
-          (ob_high = highest body top, ob_low = lowest body bottom)
-
-        If there is only ONE opposing candle at the tip
-        → that single candle is the OB zone
-
-    "Consecutive" means an unbroken run of same-direction candles
-    walking back from the tip with no interruption.
-
     For a swing HIGH tip (bearish OB):
-        Opposing candles = UP-close candles (close > open)
-        Walk back from tip_idx and collect every UP-close candle
-        until the run is broken by a DOWN-close candle.
-        OB zone:
-            ob_high = highest CLOSE among all collected candles (top of bodies)
-            ob_low  = lowest  OPEN  among all collected candles (bottom of bodies)
+        Opposing = UP-close candles
+        ob_high = highest CLOSE, ob_low = lowest OPEN
 
     For a swing LOW tip (bullish OB):
-        Opposing candles = DOWN-close candles (close < open)
-        Walk back from tip_idx and collect every DOWN-close candle
-        until the run is broken by an UP-close candle.
-        OB zone:
-            ob_high = highest OPEN  among all collected candles (top of bodies)
-            ob_low  = lowest  CLOSE among all collected candles (bottom of bodies)
+        Opposing = DOWN-close candles
+        ob_high = highest OPEN, ob_low = lowest CLOSE
 
-    Returns (ob_high, ob_low, start_candle_idx) or (nan, nan, -1) if not found.
-
-    Example — bearish OB with 3 consecutive up-close candles at swing HIGH:
-        candle i-3: close > open  ← start of run (oldest)
-        candle i-2: close > open
-        candle i-1: close > open  ← end of run (most recent, at tip)
-        candle i  : the tip itself (down-close that caused the high)
-        → OB zone spans all 3 candles
-        → ob_high = max(close[i-3], close[i-2], close[i-1])
-        → ob_low  = min(open[i-3],  open[i-2],  open[i-1])
-
-    Example — bullish OB with 1 down-close candle at swing LOW:
-        candle j-1: close > open  ← different direction, breaks run
-        candle j  : close < open  ← only this one qualifies
-        candle j+1: the tip low
-        → OB = just candle j
-        → ob_high = open[j], ob_low = close[j]
+    Returns (ob_high, ob_low, start_candle_idx) or (nan, nan, -1).
     """
     search_start = max(0, tip_idx - lookback)
-    collected = []  # indices of consecutive opposing candles
+    collected = []
 
-    # Walk backwards from the tip collecting consecutive opposing candles
     for j in range(tip_idx, search_start - 1, -1):
 
-        if direction == 1:  # swing HIGH → look for UP-close candles
+        if direction == 1:
             is_opposing = close_arr[j] > open_arr[j]
-        else:  # swing LOW  → look for DOWN-close candles
+        else:
             is_opposing = close_arr[j] < open_arr[j]
 
         if is_opposing:
             collected.append(j)
         else:
-            # Run broken — stop immediately
-            # (we only want the CONSECUTIVE run right at the tip)
             break
 
     if not collected:
         return np.nan, np.nan, -1
 
-    # ── Compute OB zone boundaries from the collected candles ──
-    if direction == 1:  # bearish OB — bodies of UP-close candles
-        ob_high = max(close_arr[j] for j in collected)  # top of bodies
-        ob_low = min(open_arr[j] for j in collected)  # bottom of bodies
-    else:  # bullish OB — bodies of DOWN-close candles
-        ob_high = max(open_arr[j] for j in collected)  # top of bodies
-        ob_low = min(close_arr[j] for j in collected)  # bottom of bodies
+    if direction == 1:
+        ob_high = max(close_arr[j] for j in collected)
+        ob_low = min(open_arr[j] for j in collected)
+    else:
+        ob_high = max(open_arr[j] for j in collected)
+        ob_low = min(close_arr[j] for j in collected)
 
-    # Safety check
     if ob_high <= ob_low:
         return np.nan, np.nan, -1
 
-    start_idx = collected[-1]  # oldest candle in the run
+    start_idx = collected[-1]
     return ob_high, ob_low, start_idx
 
 
@@ -251,32 +209,15 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Order Block detection anchored to confirmed IT and LT swing tips.
 
-    TRIGGER: when an ITH, ITL, LTH, or LTL is confirmed, we immediately
-    look back at the candles that formed that swing tip and identify the
-    Order Block there.
-
-    Bullish OB (+OB):
-        Confirmed at an ITL or LTL tip.
-        = last down-close candle at the swing LOW with best body-to-wick ratio.
-        This is the candle that represents the last institutional selling
-        before the bullish displacement that formed the swing low.
-
-    Bearish OB (-OB):
-        Confirmed at an ITH or LTH tip.
-        = last up-close candle at the swing HIGH with best body-to-wick ratio.
-        This is the last institutional buying before the bearish displacement.
-
-    Mitigated: when price closes THROUGH the entire OB candle body.
-        Bullish OB mitigated: close < ob_low
-        Bearish OB mitigated: close > ob_high
-
     Internal: _ob_high, _ob_low
     Features:
         feature_ob_active       0/1
         feature_ob_direction    +1 (bullish) / -1 (bearish)
-        feature_ob_position     0.0 (at OB low) → 1.0 (at OB high)
-        feature_ob_50_dist      |position - 0.5|, near 0.0 = ideal entry
-        feature_ob_correct_side 1 = price approaching from correct side
+        feature_ob_position     0.0→1.0 within OB
+        feature_ob_50_dist      |position - 0.5|
+        feature_ob_correct_side 1=price approaching from correct side
+        feature_ob_dist_atr     distance from close to nearest OB edge / ATR
+                                NEW: how far price is from actually touching the OB
     """
     required = ["_ith_flag", "_itl_flag", "_ith_price", "_itl_price"]
     for r in required:
@@ -291,7 +232,6 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
     low = df["low"].values
     atr = df["_atr"].values
 
-    # Structure flags — OBs are anchored to these confirmations
     ith_flag = df["_ith_flag"].values.astype(bool)
     itl_flag = df["_itl_flag"].values.astype(bool)
     lth_flag = df.get(
@@ -309,58 +249,54 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
     ob_pos = np.full(n, np.nan)
     ob_50_dist = np.full(n, np.nan)
     ob_correct = np.zeros(n)
+    ob_dist_atr = np.full(n, np.nan)  # NEW
 
-    # Active OBs: list of [ob_high, ob_low, direction (+1/-1)]
     active_obs = []
 
     for i in range(1, n):
         if np.isnan(atr[i]) or atr[i] == 0:
             continue
 
-        # ── Step 1: Check if a new IT or LT swing tip was confirmed ──
         # When ITH confirmed → Bearish OB at that swing tip
         if ith_flag[i] or lth_flag[i]:
             oh, ol, ob_idx = _find_ob_at_swing_tip(
                 tip_idx=i,
-                direction=1,  # swing HIGH → bearish OB
+                direction=1,
                 open_arr=open_,
                 close_arr=close,
                 high_arr=high,
                 low_arr=low,
             )
             if not np.isnan(oh) and oh > ol:
-                active_obs.append([oh, ol, -1])  # -1 = bearish OB
+                active_obs.append([oh, ol, -1])
 
         # When ITL confirmed → Bullish OB at that swing tip
         if itl_flag[i] or ltl_flag[i]:
             oh, ol, ob_idx = _find_ob_at_swing_tip(
                 tip_idx=i,
-                direction=-1,  # swing LOW → bullish OB
+                direction=-1,
                 open_arr=open_,
                 close_arr=close,
                 high_arr=high,
                 low_arr=low,
             )
             if not np.isnan(oh) and oh > ol:
-                active_obs.append([oh, ol, 1])  # +1 = bullish OB
+                active_obs.append([oh, ol, 1])
 
-        # ── Step 2: Mitigate OBs that price closed through ──────────
-        # Bullish OB: mitigated when close BELOW the OB low (institution failed)
-        # Bearish OB: mitigated when close ABOVE the OB high
+        # Mitigate OBs
         still_active = []
         for ob in active_obs:
             oh, ol, od = ob
             if od == 1 and close[i] < ol:
-                continue  # bullish OB mitigated
+                continue
             if od == -1 and close[i] > oh:
-                continue  # bearish OB mitigated
+                continue
             still_active.append(ob)
         active_obs = still_active
 
         if not active_obs:
             continue
 
-        # ── Step 3: Use the most recently formed active OB ──────────
         oh, ol, od = active_obs[-1]
 
         _ob_high_arr[i] = oh
@@ -374,13 +310,14 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
             ob_pos[i] = pos
             ob_50_dist[i] = abs(pos - 0.5)
 
-        # Correct side:
-        #   Bullish OB (+1): price should be BELOW or ENTERING from below
-        #   Bearish OB (-1): price should be ABOVE or ENTERING from above
         if od == 1:
             ob_correct[i] = 1 if close[i] <= oh else 0
+            # Distance from close to bullish OB high (entry edge) — positive = price above OB
+            ob_dist_atr[i] = (close[i] - oh) / atr[i]
         else:
             ob_correct[i] = 1 if close[i] >= ol else 0
+            # Distance from close to bearish OB low — positive = price below OB
+            ob_dist_atr[i] = (ol - close[i]) / atr[i]
 
     df["_ob_high"] = _ob_high_arr
     df["_ob_low"] = _ob_low_arr
@@ -389,6 +326,7 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
     df["feature_ob_position"] = ob_pos
     df["feature_ob_50_dist"] = ob_50_dist
     df["feature_ob_correct_side"] = ob_correct
+    df["feature_ob_dist_atr"] = ob_dist_atr  # NEW
 
     return df
 
@@ -400,23 +338,13 @@ def add_order_block_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Breaker Block: the last series of opposing candles that failed to hold
-    price after a stop run (sweeping a previous high/low) followed by
-    a structure shift (BOS in the opposite direction).
-
-    Specifically:
-    - A bullish breaker was originally a bearish OB zone that price
-      broke ABOVE, turning it into support on a return.
-    - A bearish breaker was originally a bullish OB zone that price
-      broke BELOW, turning it into resistance on a return.
-
-    This happens after a BOS — so we look for former OB zones that
-    price has since breached in the opposite direction.
+    Breaker Block: former OB zone that price broke through, now acts as
+    support (bullish breaker) or resistance (bearish breaker) on return.
 
     Internal: _bb_high, _bb_low
     Features:
         feature_bb_active       0/1
-        feature_bb_direction    +1 (bullish breaker) / -1 (bearish breaker)
+        feature_bb_direction    +1 / -1
         feature_bb_position     0.0→1.0 within breaker zone
         feature_bb_50_dist      |position - 0.5|
         feature_bb_correct_side 1=price returning from correct side
@@ -444,53 +372,41 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
     bb_50_dist = np.full(n, np.nan)
     bb_correct = np.zeros(n)
 
-    # Track former OBs that have been broken → become breakers
-    # Format: [high, low, direction_as_breaker]
     active_breakers = []
-    former_obs = []  # OBs we'll monitor for being broken
+    former_obs = []
+    seen_ob_keys = set()
 
     ob_high_vals = df["_ob_high"].values
     ob_low_vals = df["_ob_low"].values
     ob_dir_vals = df["feature_ob_direction"].values
 
-    # Track which OB zones have been seen — use a dict keyed by
-    # (rounded high, rounded low, direction) to avoid float equality issues
-    # and prevent the same OB being added on every active candle
-    seen_ob_keys = set()
-
     for i in range(1, n):
         c = close[i]
 
-        # ── Record newly formed OBs — only on transition candles ──
-        # A new OB appears when _ob_high changes value from previous candle
-        if i >= 1:
-            prev_oh = ob_high_vals[i - 1]
-            curr_oh = ob_high_vals[i]
-            # New OB if high changed OR first appearance
-            if not np.isnan(curr_oh) and (np.isnan(prev_oh) or curr_oh != prev_oh):
-                ol = ob_low_vals[i]
-                od = ob_dir_vals[i]
-                # Round to 6 decimal places for stable key
-                key = (round(curr_oh, 6), round(ol, 6), int(od))
-                if key not in seen_ob_keys:
-                    seen_ob_keys.add(key)
-                    former_obs.append([curr_oh, ol, od])
+        # Record newly formed OBs
+        prev_oh = ob_high_vals[i - 1]
+        curr_oh = ob_high_vals[i]
+        if not np.isnan(curr_oh) and (np.isnan(prev_oh) or curr_oh != prev_oh):
+            ol = ob_low_vals[i]
+            od = ob_dir_vals[i]
+            key = (round(curr_oh, 6), round(ol, 6), int(od))
+            if key not in seen_ob_keys:
+                seen_ob_keys.add(key)
+                former_obs.append([curr_oh, ol, od])
 
-        # ── Check if any former OB has been broken (becomes breaker) ──
+        # Check if former OB broken → becomes breaker
         remaining = []
         for ob in former_obs:
             oh, ol, od = ob
             if od == -1 and bos_bull[i] == 1 and c > oh:
-                # Bearish OB broken to upside → bullish breaker
                 active_breakers.append([oh, ol, 1])
             elif od == 1 and bos_bear[i] == 1 and c < ol:
-                # Bullish OB broken to downside → bearish breaker
                 active_breakers.append([oh, ol, -1])
             else:
                 remaining.append(ob)
         former_obs = remaining
 
-        # ── Remove breakers price has moved far past ──
+        # Remove stale breakers
         active_breakers = [
             b
             for b in active_breakers
@@ -513,7 +429,7 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
             bb_pos[i] = pos
             bb_50_dist[i] = abs(pos - 0.5)
 
-        if bd == 1:  # bullish breaker — price should be at or below it
+        if bd == 1:
             bb_correct[i] = 1 if c <= bh else 0
         else:
             bb_correct[i] = 1 if c >= bl else 0
@@ -530,6 +446,128 @@ def add_breaker_block_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════
+# NEW: LIQUIDITY POOL DETECTION
+# ══════════════════════════════════════════════════════
+
+
+def add_liquidity_pool_features(df: pd.DataFrame, lookback: int = 50) -> pd.DataFrame:
+    """
+    Detects clustered equal highs (buy-side liquidity) and equal lows
+    (sell-side liquidity) within a rolling window.
+
+    WHY THIS MATTERS FOR 5RRR:
+        Liquidity pools ARE targets. Price doesn't move randomly — it moves
+        to sweep the stops sitting at equal highs/lows. If you can see that
+        there is a large liquidity pool N ATRs above entry, the model has
+        explicit information that the trade has room to run.
+
+        - Pool above price = buy stops (short sellers SLs, breakout buyer entries)
+        - Pool below price = sell stops (long holders SLs, breakout seller entries)
+
+        When bias is bullish and there is a large buy-side pool above:
+            → Price will likely target it → hold the long trade to that level
+        When bias is bearish and a sell-side pool exists below:
+            → Price will likely sweep it → hold the short trade to that level
+
+    Features:
+        feature_liq_above_count   Number of equal highs in recent window.
+                                  Higher = larger pool = stronger magnet.
+        feature_liq_below_count   Number of equal lows in recent window.
+
+        feature_liq_above_dist    (pool_level - close) / ATR.
+                                  Positive = pool is above current price.
+                                  Large positive = target is far away (high RRR potential).
+        feature_liq_below_dist    (close - pool_level) / ATR.
+                                  Positive = pool is below current price.
+
+        feature_liq_above_viable  1 if there is a pool > 3R above (long trade has room).
+        feature_liq_below_viable  1 if there is a pool > 3R below (short trade has room).
+
+    Equal high/low tolerance: 1.5× ATR percentage (adaptive to price level).
+    A cluster requires at least 2 touches within tolerance to be a valid pool.
+    """
+    df = df.copy()
+    n = len(df)
+    h = df["high"].values
+    l = df["low"].values
+    c = df["close"].values
+    atr = df["_atr"].values
+
+    liq_above_count = np.zeros(n)
+    liq_below_count = np.zeros(n)
+    liq_above_dist = np.full(n, np.nan)
+    liq_below_dist = np.full(n, np.nan)
+    liq_above_viable = np.zeros(n)
+    liq_below_viable = np.zeros(n)
+
+    # Tolerance: adaptive — use ATR-relative tolerance so it works across
+    # different price levels and volatility regimes
+    # At EURUSD M15 ATR ≈ 0.0012, tolerance ≈ 0.0003 (3 pips) which is correct
+    tol_atr_fraction = getattr(config, "LIQ_POOL_TOL_ATR", 0.25)
+    min_rrr_viable = getattr(config, "MIN_RR_RATIO", 3.0)
+
+    for i in range(lookback, n):
+        a = atr[i] if not np.isnan(atr[i]) and atr[i] > 0 else 1e-8
+        tol = a * tol_atr_fraction
+
+        window_h = h[i - lookback : i]
+        window_l = l[i - lookback : i]
+
+        # Find the most prominent equal-high cluster in the window
+        # Strategy: for each candidate high, count how many others are within tol
+        best_above_count = 0
+        best_above_level = np.nan
+
+        # Only look at highs ABOVE current close (liquidity targets above)
+        above_mask = window_h > c[i]
+        if above_mask.any():
+            candidates = window_h[above_mask]
+            for cand in candidates:
+                count = int(np.sum(np.abs(window_h - cand) <= tol))
+                if count > best_above_count:
+                    best_above_count = count
+                    best_above_level = cand
+
+        liq_above_count[i] = best_above_count if best_above_count >= 2 else 0
+        if best_above_count >= 2 and not np.isnan(best_above_level):
+            liq_above_dist[i] = (best_above_level - c[i]) / a
+            one_r = c[i] * getattr(config, "RISK_PER_TRADE", 0.0015)
+            if one_r > 0:
+                r_dist = (best_above_level - c[i]) / one_r
+                liq_above_viable[i] = float(r_dist >= min_rrr_viable)
+
+        # Equal-low cluster BELOW current close
+        best_below_count = 0
+        best_below_level = np.nan
+
+        below_mask = window_l < c[i]
+        if below_mask.any():
+            candidates = window_l[below_mask]
+            for cand in candidates:
+                count = int(np.sum(np.abs(window_l - cand) <= tol))
+                if count > best_below_count:
+                    best_below_count = count
+                    best_below_level = cand
+
+        liq_below_count[i] = best_below_count if best_below_count >= 2 else 0
+        if best_below_count >= 2 and not np.isnan(best_below_level):
+            liq_below_dist[i] = (c[i] - best_below_level) / a
+            one_r = c[i] * getattr(config, "RISK_PER_TRADE", 0.0015)
+            if one_r > 0:
+                r_dist = (c[i] - best_below_level) / one_r
+                liq_below_viable[i] = float(r_dist >= min_rrr_viable)
+
+    df["feature_liq_above_count"] = liq_above_count
+    df["feature_liq_below_count"] = liq_below_count
+    df["feature_liq_above_dist"] = liq_above_dist
+    df["feature_liq_below_dist"] = liq_below_dist
+    df["feature_liq_above_viable"] = liq_above_viable
+    df["feature_liq_below_viable"] = liq_below_viable
+
+    return df
+
+
+# ══════════════════════════════════════════════════════
 # MASTER
 # ══════════════════════════════════════════════════════
 
@@ -541,4 +579,6 @@ def add_zone_features(df: pd.DataFrame) -> pd.DataFrame:
     df = add_order_block_features(df)
     print("  [zones] Detecting Breaker Blocks...")
     df = add_breaker_block_features(df)
+    print("  [zones] Detecting Liquidity Pools...")
+    df = add_liquidity_pool_features(df)
     return df

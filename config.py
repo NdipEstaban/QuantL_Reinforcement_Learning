@@ -8,7 +8,7 @@ config.py — FIXES:
 """
 
 # ── DATA ─────────────────────────────────────────────────────────
-DATA_FILE = "data/unseen/EURUSD_2022_M15.csv"
+DATA_FILE = "data/raw/EURUSD_M15_2010-2016.csv"
 DATE_COLUMN = "date"
 OPEN_COLUMN = "open"
 HIGH_COLUMN = "high"
@@ -35,7 +35,7 @@ ASIAN_END = 8
 
 # ── ENVIRONMENT ──────────────────────────────────────────────────
 POSITIONS = [-1, 0, 1]
-TRADING_FEES = 0.0001
+TRADING_FEES = 0.0003
 BORROW_INTEREST_RATE = 0.000003
 PORTFOLIO_INITIAL_VALUE = 10_000
 MAX_EPISODE_DURATION = 2000
@@ -50,7 +50,7 @@ CATASTROPHIC_SL_ATR = 5.0
 SL_ATR_BUFFER = 0.1
 
 # ── REWARD ───────────────────────────────────────────────────────
-REWARD_FUNCTION = "account_flip_aggressive_v3"  # v3 — teaches model to use action=0
+REWARD_FUNCTION = "custom"  # v4 — teaches model to use action=0
 
 FLIP_RRR_MULTIPLIER = 4.0
 FLIP_LOG_SCALE = 10.0  # scales the log return signal
@@ -73,9 +73,9 @@ N_ENVS = 6
 
 # ── TRAINING ─────────────────────────────────────────────────────
 TOTAL_TIMESTEPS = 500_000
-ALGORITHM = "PPO"  # RecurrentPPO or PPO
+ALGORITHM = "RecurrentPPO"  # RecurrentPPO or PPO
 CHECKPOINT_FREQ = 100_000
-MODEL_SAVE_PATH = "models/positive_models/"
+MODEL_SAVE_PATH = "models/rppo/v4.0"
 LOG_DIR = "logs/"
 
 # ── RECURRENT PPO ─────────────────────────────────────────────────
@@ -109,9 +109,9 @@ TRAINING_PHASES = [
         "algorithm": "RecurrentPPO",
         "data_file": "data/raw/EURUSD_M15_2010-2016.csv",
         # "force_reprocess": True,  # ← reprocess even if cache is valid
-        "timesteps": 2_000_000,
-        "resume_from": None,
-        "save_to": "models/rppo/v1.1",
+        "timesteps": 5_000_000,
+        "resume_from": "models/rppo/v4.0/final_model.zip",
+        "save_to": "models/rppo/v4.0",
         "skip": False,
         "ppo_config": {
             "n_steps": 2048,
@@ -119,9 +119,9 @@ TRAINING_PHASES = [
             "n_epochs": 5,
             "gamma": 0.98,
             "gae_lambda": 0.95,
-            "ent_coef": 0.08,
-            "learning_rate": 0.0001,
-            "clip_range": 0.08,
+            "ent_coef": 0.05,
+            "learning_rate": 0.00008,
+            "clip_range": 0.2,
         },
     },
     {
@@ -130,9 +130,9 @@ TRAINING_PHASES = [
         "algorithm": "RecurrentPPO",
         "data_file": "data/raw/EURUSD_2022-2023_M15.csv",
         # "force_reprocess": True,  # ← reprocess even if cache is valid
-        "timesteps": 500_000,
-        "resume_from": "models/rppo/v1.1/final_model.zip",
-        "save_to": "models/rppo/v1.1",
+        "timesteps": 1_000_000,
+        "resume_from": "models/rppo/v4.0/final_model.zip",
+        "save_to": "models/rppo/v4.0",
         "skip": True,
         "ppo_config": {
             "n_steps": 2048,
@@ -151,9 +151,9 @@ TRAINING_PHASES = [
         "algorithm": "RecurrentPPO",
         "data_file": "data/unseen/EURUSD_2024_M15_fixed.csv",
         # "force_reprocess": True,  # ← reprocess even if cache is valid
-        "timesteps": 200_000,
-        "resume_from": "models/rppo/v1.1/final_model.zip",
-        "save_to": "models/rppo/v1.1",
+        "timesteps": 500_000,
+        "resume_from": "models/rppo/v4.0/final_model.zip",
+        "save_to": "models/rppo/v4.0",
         "skip": True,
         "ppo_config": {
             "n_steps": 2048,
